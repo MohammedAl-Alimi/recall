@@ -123,10 +123,23 @@ func commandLine(cwd string, argv []string) string {
 		return ""
 	}
 	cmd := launch.ShellJoin(argv)
-	if cwd != "" {
-		return "cd " + launch.ShellQuote(cwd) + " && " + cmd
+	// A multiplexer command carries the working directory in its own flags,
+	// so prefixing 'cd' would show a command nobody runs.
+	if cwd == "" || carriesOwnCwd(argv) {
+		return cmd
 	}
-	return cmd
+	return "cd " + launch.ShellQuote(cwd) + " && " + cmd
+}
+
+// carriesOwnCwd reports whether argv already tells its terminal which
+// directory to start in, which cmux and tmux both do.
+func carriesOwnCwd(argv []string) bool {
+	for _, a := range argv {
+		if a == "--cwd" || a == "-c" {
+			return true
+		}
+	}
+	return false
 }
 
 func toRow(s *model.Session) Row {
