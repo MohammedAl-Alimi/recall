@@ -480,7 +480,7 @@
     if (r.ghost) {
       h += '<button class="btn ghost" disabled title="The transcript is gone">Cannot open</button>';
     } else {
-      var label = r.isLive ? 'Focus' : 'Open';
+      var label = r.isLive ? 'Focus tab' : 'Open in Terminal';
       h += '<button class="btn primary" data-act="open" data-target="terminal"' + (busy ? ' disabled' : '') + '>' + label + '</button>';
       if (d.cmuxAvailable && !r.isLive) h += '<button class="btn ghost" data-act="open" data-target="cmux"' + (busy ? ' disabled' : '') + '>Open in cmux</button>';
     }
