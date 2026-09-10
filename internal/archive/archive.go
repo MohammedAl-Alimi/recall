@@ -61,6 +61,10 @@ func safeName(s string) string {
 // file system allows it and copied otherwise. When withSidecars is set the
 // session's sidecar directories are copied as well; callers that want that
 // part detached can pass false here and call CopySidecars later.
+//
+// Archive is safe to call repeatedly: an existing link is kept and the
+// manifest is rewritten with the transcript's current size and sum, so a
+// re-archive after more lines were appended refreshes the manifest.
 func Archive(p model.Paths, sess *model.Session, withSidecars bool) (string, error) {
 	if sess == nil || sess.ID == "" {
 		return "", errors.New("archive: session has no id")
@@ -257,22 +261,45 @@ func Restore(p model.Paths, sess *model.Session) (string, error) {
 	if err := copyFile(src, target); err != nil {
 		return "", err
 	}
-	if m, err := ReadManifest(p, sess.ID); err == nil && m != nil {
-		for _, f := range m.Files {
-			if f.Path != TranscriptName {
-				continue
-			}
-			sum, _, err := hashFile(target)
-			if err != nil {
-				return "", err
-			}
-			if sum != f.SHA256 {
-				_ = os.Remove(target)
-				return "", fmt.Errorf("archive: restored transcript checksum mismatch for %s", model.ShortID(sess.ID))
-			}
-		}
+	if err := verifyRestored(p, sess.ID, src, target); err != nil {
+		_ = os.Remove(target)
+		return "", err
 	}
 	return target, nil
+}
+
+// verifyRestored checks that target is a faithful copy of the archive file
+// src. The manifest sum is only consulted for copied archives: a hard-linked
+// archive shares its inode with the live transcript, so any line appended
+// after Archive ran (a hook firing before Claude's final write, "archive
+// --all" on a running session) legitimately changes the content while the
+// link still holds everything. In that case the archive itself is the
+// source of truth and the fixed manifest sum would only reject good data.
+func verifyRestored(p model.Paths, sid, src, target string) error {
+	srcSum, _, err := hashFile(src)
+	if err != nil {
+		return err
+	}
+	dstSum, _, err := hashFile(target)
+	if err != nil {
+		return err
+	}
+	if srcSum != dstSum {
+		return fmt.Errorf("archive: restored transcript checksum mismatch for %s", model.ShortID(sid))
+	}
+	m, err := ReadManifest(p, sid)
+	if err != nil || m == nil || m.Linked {
+		return nil
+	}
+	for _, f := range m.Files {
+		if f.Path != TranscriptName {
+			continue
+		}
+		if srcSum != f.SHA256 {
+			return fmt.Errorf("archive: archived transcript checksum mismatch for %s", model.ShortID(sid))
+		}
+	}
+	return nil
 }
 
 // findTranscripts walks projectsDir for any file whose name starts with
@@ -326,22 +353,40 @@ var linkFn = os.Link
 
 // linkOrCopy hard-links src to dst, replacing a stale dst, and falls back
 // to a copy when linking fails. It reports whether dst is a hard link.
+//
+// The link is created under a temporary name inside the archive directory
+// and renamed over dst only once it exists, and copyFile does the same for
+// the copy path, so a previous archive is never removed until its
+// replacement is complete. If both the link and the copy fail the old
+// archive stays in place.
 func linkOrCopy(src, dst string) (bool, error) {
 	if _, err := os.Stat(dst); err == nil {
 		if same, _ := sameFile(src, dst); same {
 			return true, nil
 		}
-		if err := os.Remove(dst); err != nil {
-			return false, err
-		}
 	}
-	if err := linkFn(src, dst); err == nil {
+	if err := linkTemp(src, dst); err == nil {
 		return true, nil
 	}
 	if err := copyFile(src, dst); err != nil {
 		return false, err
 	}
 	return false, nil
+}
+
+// linkTemp hard-links src into a private temp directory next to dst and
+// renames the link over dst. The temp directory is always removed.
+func linkTemp(src, dst string) error {
+	tmpDir, err := os.MkdirTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".link-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	tmp := filepath.Join(tmpDir, filepath.Base(dst))
+	if err := linkFn(src, tmp); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 func sameFile(a, b string) (bool, error) {

@@ -280,3 +280,172 @@ func TestEncodeProjectDir(t *testing.T) {
 		t.Fatalf("encode = %s", got)
 	}
 }
+
+// A hard-linked archive follows every later append to the live transcript.
+// Restore must accept the archive's current content instead of the sum
+// recorded at archive time, otherwise every session that received one more
+// line after the SessionEnd hook ran would be unrestorable.
+func TestRestoreLinkedArchiveAfterAppend(t *testing.T) {
+	p, sess := fixture(t)
+	if _, err := Archive(p, sess, false); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := ReadManifest(p, sid)
+	f, err := os.OpenFile(sess.Path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := `{"type":"user","uuid":"u2","sessionId":"` + sid + `","message":{"role":"user","content":"one more"}}` + "\n"
+	if _, err := f.WriteString(extra); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	want := sha(t, sess.Path)
+	if want == before.Files[0].SHA256 {
+		t.Fatal("append did not change the transcript sum")
+	}
+	if err := os.Remove(sess.Path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Restore(p, sess)
+	if err != nil {
+		t.Fatalf("restore after append: %v", err)
+	}
+	if sha(t, got) != want {
+		t.Fatal("restored content does not match the appended archive")
+	}
+	if !strings.HasSuffix(string(mustRead(t, got)), extra) {
+		t.Fatal("restored transcript lost the appended line")
+	}
+}
+
+// Re-archiving a linked session refreshes the manifest with the current
+// size and sum.
+func TestArchiveRefreshesManifestOnRearchive(t *testing.T) {
+	p, sess := fixture(t)
+	if _, err := Archive(p, sess, false); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := ReadManifest(p, sid)
+	f, err := os.OpenFile(sess.Path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"user","uuid":"u3"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := Archive(p, sess, false); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := ReadManifest(p, sid)
+	if !after.Linked {
+		t.Fatal("re-archive lost the link")
+	}
+	if after.Files[0].SHA256 == before.Files[0].SHA256 || after.Files[0].Size <= before.Files[0].Size {
+		t.Fatalf("manifest not refreshed: before=%+v after=%+v", before.Files[0], after.Files[0])
+	}
+	if after.Files[0].SHA256 != sha(t, sess.Path) {
+		t.Fatal("refreshed manifest sum does not match the transcript")
+	}
+}
+
+// A copied (not linked) archive is still checked against the manifest sum so
+// a corrupted archive file is not silently restored.
+func TestRestoreCopiedArchiveDetectsCorruption(t *testing.T) {
+	p, sess := fixture(t)
+	old := linkFn
+	linkFn = func(string, string) error { return errors.New("EXDEV") }
+	defer func() { linkFn = old }()
+	if _, err := Archive(p, sess, false); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := ReadManifest(p, sid)
+	if m.Linked {
+		t.Fatal("expected a copied archive")
+	}
+	archived := filepath.Join(Dir(p, sid), TranscriptName)
+	if err := os.WriteFile(archived, []byte(`{"type":"user","uuid":"corrupt"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sess.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(p, sess); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum error, got %v", err)
+	}
+	if _, err := os.Stat(sess.Path); !os.IsNotExist(err) {
+		t.Fatal("bad restore left a transcript behind")
+	}
+}
+
+// When both the link and the copy fail, the previous archive must survive.
+func TestLinkOrCopyKeepsOldArchiveOnFailure(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	p, sess := fixture(t)
+	old := linkFn
+	linkFn = func(string, string) error { return errors.New("EXDEV") }
+	defer func() { linkFn = old }()
+	dir := Dir(p, sid)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(dir, TranscriptName)
+	if err := os.WriteFile(previous, []byte("previous archive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Make the copy fail: the source can be stat'ed but not opened.
+	if err := os.Chmod(sess.Path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(sess.Path, 0o644)
+	if _, err := Archive(p, sess, false); err == nil {
+		t.Fatal("expected archive to fail")
+	}
+	b := mustRead(t, previous)
+	if string(b) != "previous archive\n" {
+		t.Fatalf("previous archive was lost or replaced: %q", b)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Fatalf("temp leftover in archive dir: %s", e.Name())
+		}
+	}
+}
+
+// The link itself lands via a temp name plus rename so a stale archive is
+// replaced atomically and no temp directory is left behind.
+func TestLinkTempReplacesStaleAtomically(t *testing.T) {
+	p, sess := fixture(t)
+	dir := Dir(p, sid)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, TranscriptName)
+	if err := os.WriteFile(stale, []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := linkOrCopy(sess.Path, stale)
+	if err != nil || !linked {
+		t.Fatalf("linkOrCopy = %v %v", linked, err)
+	}
+	if same, _ := sameFile(sess.Path, stale); !same {
+		t.Fatal("stale archive not replaced by a link")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("unexpected entries in archive dir: %v", entries)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
