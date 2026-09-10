@@ -75,7 +75,7 @@ func TestShellQuote(t *testing.T) {
 		"my name":         "'my name'",
 		"it's":            `'it'\''s'`,
 		"a$b":             "'a$b'",
-		"Work @act.3 /x":  "'Work @act.3 /x'",
+		"Work @acme.io /x":  "'Work @acme.io /x'",
 		"semi;colon":      "'semi;colon'",
 		"back`tick":       "'back`tick'",
 		"dollar$(uname)":  "'dollar$(uname)'",

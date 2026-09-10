@@ -21,7 +21,7 @@ func TestShellQuote(t *testing.T) {
 		"it's":        `'it'\''s'`,
 		"$HOME":       "'$HOME'",
 		"--resume=x":  "--resume=x",
-		"Work @act.3": "'Work @act.3'",
+		"Work @acme.io": "'Work @acme.io'",
 		"a\"b":        `'a"b'`,
 		"a\nb":        "'a\nb'",
 		"back\\slash": `'back\slash'`,
@@ -536,8 +536,8 @@ func TestFocusTerminalScript(t *testing.T) {
 }
 
 func TestNewTerminalTabScript(t *testing.T) {
-	s := NewTerminalTabScript("/Users/me/Work @act.3", `claude --resume abc -n "it's"`)
-	wantLine := `"cd '/Users/me/Work @act.3' && claude --resume abc -n \"it's\""`
+	s := NewTerminalTabScript("/Users/me/Work @acme.io", `claude --resume abc -n "it's"`)
+	wantLine := `"cd '/Users/me/Work @acme.io' && claude --resume abc -n \"it's\""`
 	for _, want := range []string{
 		`tell application "Terminal"`,
 		"activate",
