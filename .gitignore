@@ -1,0 +1,5 @@
+dist/
+/recall
+.DS_Store
+*.test
+*.out

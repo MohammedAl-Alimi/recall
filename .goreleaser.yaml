@@ -1,0 +1,55 @@
+version: 2
+
+project_name: recall
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: recall
+    main: ./cmd/recall
+    binary: recall
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+brews:
+  - name: recall
+    repository:
+      owner: MohammedAl-Alimi
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/MohammedAl-Alimi/recall
+    description: Terminal session manager for the Claude Code CLI
+    license: MIT
+    install: |
+      bin.install "recall"
+    test: |
+      system "#{bin}/recall", "version"
