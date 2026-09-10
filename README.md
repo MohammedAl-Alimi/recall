@@ -62,6 +62,8 @@ them, lists them, and reopens the one you pick.
   ends. A session from last spring still resumes.
 - **Dashboard.** `recall serve` shows the same list in your browser, local
   only, with Open buttons on every card.
+- **Always on.** `recall service install` keeps the dashboard running at one
+  bookmarkable URL and archives every session once a day. macOS only.
 - **Terminal.app, iTerm2 or cmux.** Pick where a session opens with
   `--terminal`. With cmux installed, each session gets its own workspace.
 
@@ -164,7 +166,13 @@ recall new -n scanner --keep    # new session here, kept alive
 recall new --terminal iterm     # new session in a new iTerm2 tab
 recall serve                    # the web dashboard
 recall archive --all            # archive every transcript now
+recall archive --all --quiet    # same, one summary line, silent if unchanged
 recall restore 0f1e2d3c         # bring an archived transcript back
+recall service install          # dashboard at login + daily archive (macOS)
+recall service install --at 02:30   # move the daily archive to 02:30
+recall service url              # the bookmarkable dashboard URL, one line
+recall service status           # what is installed, loaded and running
+recall service uninstall        # remove both background services
 recall doctor --json            # environment checks as JSON
 ```
 
@@ -229,6 +237,67 @@ The dashboard is local only:
 - Cross-origin requests are refused and the page loads no external scripts.
 
 See [docs/dashboard.md](docs/dashboard.md) for the API and the limits.
+
+## Always on
+
+`recall serve` runs until you close the terminal. `recall service` makes it
+a background job instead, and adds a daily archive run.
+
+```sh
+recall service install
+```
+
+Two launchd agents are installed. Each step prints its plan and asks y/N.
+Pass `--yes` to skip the questions, `--serve` or `--archive` to install only
+one of them.
+
+**The dashboard at a fixed address.** The first agent runs
+`recall serve --no-open` at login and restarts it after a crash. The token
+lives in `~/.recall/serve.token` and does not change, so the address does
+not change either. `recall service url` prints it on one line:
+
+```sh
+recall service url
+# http://127.0.0.1:4747/?t=4fa2e085621d33cfacb1c15723a51072
+```
+
+That is a link you can bookmark, or drop into whatever other dashboard you
+already keep open. Use `--addr` at install time to move it off port 4747.
+
+**A daily archive.** The second agent runs `recall archive --all --quiet`
+once a day at 09:00. It is the third layer under your history, and the only
+one that does not depend on you:
+
+1. Retention. `recall setup` raises `cleanupPeriodDays` so Claude stops
+   deleting after 30 days. If that setting is ever reset, everything newer
+   than the reset is at risk again.
+2. The SessionEnd hook. It archives a session the moment it ends, but only
+   when it ends cleanly. A session you left open for three weeks has not
+   ended at all, and a crash or a reboot skips the hook.
+3. The daily run. It walks every transcript on disk and archives whatever is
+   not archived yet, whether the session ended or not.
+
+The run is idempotent. A session whose archive already matches the
+transcript is skipped, so repeating it is cheap and `--quiet` keeps the log
+empty on a day with nothing new.
+
+```sh
+recall service install --at 02:30   # run the archive at 02:30 instead
+recall service status               # installed, loaded, pid, plist path
+recall service uninstall            # stop both and remove both plists
+```
+
+Changing the time or the address means running `install` again with the new
+value. Uninstalling removes the two property lists and nothing else: your
+archives, labels and pins stay where they are.
+
+The service is macOS only, because it manages launchd user agents. On Linux
+the same two commands work fine; wire `recall serve --no-open` and
+`recall archive --all --quiet` into a systemd user service and a timer by
+hand. `recall service` prints the exact command to put in them.
+
+See [docs/service.md](docs/service.md) for the property lists, the labels,
+the log files and every launchctl call recall makes.
 
 ## Keys
 
@@ -339,6 +408,8 @@ same tests; the focus and new-tab tiers are macOS only.
 - [docs/design.md](docs/design.md): architecture, data sources, states.
 - [docs/dashboard.md](docs/dashboard.md): the web dashboard, its API and
   security model.
+- [docs/service.md](docs/service.md): the launchd agents behind
+  `recall service`, their property lists and logs.
 - [docs/compatibility.md](docs/compatibility.md): the four Claude Code
   contracts recall depends on.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
