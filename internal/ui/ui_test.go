@@ -146,7 +146,7 @@ func key(s string) tea.KeyMsg {
 	case "tab":
 		return tea.KeyMsg{Type: tea.KeyTab}
 	case " ":
-		return tea.KeyMsg{Type: tea.KeySpace}
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 	case "up":
 		return tea.KeyMsg{Type: tea.KeyUp}
 	case "down":
