@@ -102,9 +102,14 @@ what will be lost, so the UI can show it before doing anything.
 3. **print**: live in Cursor, VS Code or another host recall cannot drive: the
    hint tells you where it is.
 4. **resume**: closed: `cd <work cwd> && claude --resume <id>` with recorded
-   flags replayed when their paths still exist. New tab by default in
-   Terminal.app and iTerm, in place elsewhere or with `--in-place`.
-   `--fork` adds `--fork-session`. `bypassPermissions` is never replayed.
+   flags replayed when their paths still exist. In place by default (Enter
+   in the list, `recall open`); a new Terminal.app or iTerm2 tab with `o` or
+   `--new-tab`. Inline JSON given to `--settings` or `--mcp-config` is never
+   replayed because it can carry a permission mode or secrets. The loss note
+   (gone directory, dropped flags, lost background jobs, dangling tool call)
+   is shown in the status bar before the action runs and printed as
+   `recall: <note>` to stderr right before claude starts. `--fork` adds
+   `--fork-session`. `bypassPermissions` is never replayed.
 5. **error**: ghosts cannot be opened; their prompts are shown instead.
 
 Before a resume recall takes a non-blocking `flock` on

@@ -164,6 +164,9 @@ func execInPlace(act *launch.Action) error {
 // runAction executes a planned action. Actions that carry a script or that
 // only focus or print are delegated to launch.Run; a plain resume/new/attach
 // argv is exec'ed in place so the shell ends up running claude directly.
+// The loss note (dropped flags, lost background jobs, a missing directory)
+// is printed to stderr before claude takes over; launch.Run prints it on
+// its own path.
 func runAction(act *launch.Action, w io.Writer) error {
 	if dryRun() {
 		printAction(w, act)
@@ -172,6 +175,7 @@ func runAction(act *launch.Action, w io.Writer) error {
 	switch act.Kind {
 	case "resume", "new", "attach":
 		if act.Script == "" && len(act.Argv) > 0 {
+			launch.PrintNote(os.Stderr, act)
 			return execInPlace(act)
 		}
 	}
@@ -238,10 +242,10 @@ or a label set with 'r' in the list.`,
 			return runHolding(a, act, cmd.OutOrStdout())
 		},
 	}
-	cmd.Flags().BoolVar(&opts.NewTab, "new-tab", false, "open in a new terminal tab")
+	cmd.Flags().BoolVar(&opts.NewTab, "new-tab", false, "open in a new Terminal.app or iTerm2 tab instead of this terminal")
 	cmd.Flags().BoolVar(&opts.Keep, "keep", false, "run inside a kept tmux session that survives the tab")
 	cmd.Flags().BoolVar(&opts.Fork, "fork", false, "fork the session (--fork-session) instead of resuming it")
-	cmd.Flags().BoolVar(&opts.InPlace, "in-place", false, "replace the current shell with claude")
+	cmd.Flags().BoolVar(&opts.InPlace, "in-place", false, "replace the current shell with claude (the default; wins over --new-tab)")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "print the command instead of running it")
 	cmd.Flags().StringVarP(&name, "name", "n", "", "name for the resumed session (claude -n)")
 	cmd.Flags().StringVar(&permMode, "permission-mode", "", "permission mode for the resumed session")

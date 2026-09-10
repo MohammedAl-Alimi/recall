@@ -6,7 +6,8 @@ recall is a terminal session manager for the Claude Code CLI. It reads the
 transcripts Claude already writes to disk, shows every session with a title,
 its last outcome and whether it is still running, and reopens the one you pick
 in the way that loses the least: focus the tab it is still in, attach the tmux
-session that kept it alive, or `claude --resume` it right here.
+session that kept it alive, or `claude --resume` it right here in your
+terminal (`o` opens it in a new tab instead).
 
 ```
 recall   53 sessions · 13 live · 1 waiting                 [all]  Tab scope  / search  ? help
@@ -41,9 +42,12 @@ recall fixes three things:
    answer, open PRs, whether it is live, waiting for you, or long gone.
 3. **The reopen tier that loses the least.** Still running in a Terminal.app
    tab? recall focuses that tab. Running inside a kept tmux session? recall
-   attaches. Closed? recall resumes it, in a new tab or in place, with the
-   flags it was started with. Sessions that need your permission bubble to
-   the top and can raise a macOS notification.
+   attaches. Closed? Enter resumes it in the terminal recall runs in, `o`
+   resumes it in a new Terminal.app or iTerm2 tab, both with the flags it
+   was started with, and anything that cannot be replayed (a gone directory,
+   a dropped `--add-dir`, lost background jobs, a pending tool call) is shown
+   as a note before claude starts. Sessions that need your permission bubble
+   to the top and can raise a macOS notification.
 
 ## What stays, honestly
 

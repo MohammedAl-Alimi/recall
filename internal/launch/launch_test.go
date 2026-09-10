@@ -159,9 +159,23 @@ func TestPlanTiers(t *testing.T) {
 			},
 		},
 		{
-			name:     "closed in Apple_Terminal opens a new tab",
+			name:     "closed in Apple_Terminal resumes in place by default",
 			sess:     &model.Session{ID: sid, Cwd: dir},
 			opts:     Options{TermProgram: "Apple_Terminal"},
+			wantKind: KindResume,
+			check: func(t *testing.T, a *Action) {
+				if a.Script != "" {
+					t.Errorf("default must be an in-place resume, got script:\n%s", a.Script)
+				}
+				if got := strings.Join(a.Argv, " "); got != "claude --resume "+sid {
+					t.Errorf("argv = %q", got)
+				}
+			},
+		},
+		{
+			name:     "closed in Apple_Terminal with NewTab opens a new tab",
+			sess:     &model.Session{ID: sid, Cwd: dir},
+			opts:     Options{TermProgram: "Apple_Terminal", NewTab: true},
 			wantKind: KindResume,
 			check: func(t *testing.T, a *Action) {
 				if a.Script == "" || !strings.Contains(a.Script, `tell application "Terminal"`) {
@@ -176,9 +190,9 @@ func TestPlanTiers(t *testing.T) {
 			},
 		},
 		{
-			name:     "closed in iTerm opens a new iTerm tab",
+			name:     "closed in iTerm with NewTab opens a new iTerm tab",
 			sess:     &model.Session{ID: sid, Cwd: dir},
-			opts:     Options{TermProgram: "iTerm.app"},
+			opts:     Options{TermProgram: "iTerm.app", NewTab: true},
 			wantKind: KindResume,
 			check: func(t *testing.T, a *Action) {
 				if !strings.Contains(a.Script, `tell application "iTerm2"`) {
@@ -211,9 +225,9 @@ func TestPlanTiers(t *testing.T) {
 			},
 		},
 		{
-			name:     "InPlace overrides Apple_Terminal default",
+			name:     "InPlace wins over NewTab",
 			sess:     &model.Session{ID: sid, Cwd: dir},
-			opts:     Options{TermProgram: "Apple_Terminal", InPlace: true},
+			opts:     Options{TermProgram: "Apple_Terminal", InPlace: true, NewTab: true},
 			wantKind: KindResume,
 			check: func(t *testing.T, a *Action) {
 				if a.Script != "" {
@@ -280,8 +294,23 @@ func TestPlanUsesTermProgramEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Script == "" {
-		t.Errorf("TERM_PROGRAM=Apple_Terminal should default to a new tab")
+	if a.Script != "" {
+		t.Errorf("TERM_PROGRAM=Apple_Terminal must still resume in place by default")
+	}
+	a, err = Plan(sess, Options{NewTab: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.Script, `tell application "Terminal"`) {
+		t.Errorf("NewTab with TERM_PROGRAM=Apple_Terminal should produce a Terminal script, got:\n%s", a.Script)
+	}
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	a, err = Plan(sess, Options{NewTab: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.Script, `tell application "iTerm2"`) {
+		t.Errorf("NewTab with TERM_PROGRAM=iTerm.app should produce an iTerm2 script, got:\n%s", a.Script)
 	}
 	t.Setenv("TERM_PROGRAM", "WezTerm")
 	a, err = Plan(sess, Options{})
@@ -447,9 +476,30 @@ func TestBuildResumeArgv(t *testing.T) {
 			noteHas: []string{"dropped --add-dir " + missingDir, "dropped --settings " + missingSettings},
 		},
 		{
-			name: "inline JSON mcp config is replayed",
-			sess: model.Session{Cwd: dir, Launch: &model.Launch{Argv: []string{"claude", "--mcp-config", `{"mcpServers":{}}`}}},
-			want: "claude --resume " + sid + " --mcp-config '{\"mcpServers\":{}}'",
+			name:     "inline JSON mcp config is dropped without echoing its content",
+			sess:     model.Session{Cwd: dir, Launch: &model.Launch{Argv: []string{"claude", "--mcp-config", `{"mcpServers":{"x":{"env":{"TOKEN":"sekrit"}}}}`}}},
+			want:     "claude --resume " + sid,
+			noteHas:  []string{"dropped --mcp-config (inline JSON is not replayed)", "MCP servers reconnect"},
+			noteNone: []string{"sekrit"},
+		},
+		{
+			name:     "inline JSON settings with bypassPermissions is dropped",
+			sess:     model.Session{Cwd: dir, Launch: &model.Launch{Argv: []string{"claude", "--settings", ` {"permissions":{"defaultMode":"bypassPermissions"}}`, "--model", "opus"}}},
+			want:     "claude --resume " + sid + " --model opus",
+			noteHas:  []string{"dropped --settings (inline JSON is not replayed)"},
+			noteNone: []string{"defaultMode"},
+		},
+		{
+			name:     "inline JSON settings given as --settings=... is dropped",
+			sess:     model.Session{Cwd: dir, Launch: &model.Launch{Argv: []string{"claude", `--settings={"permissions":{"allow":["Bash(*)"]}}`, "--mcp-config=[]"}}},
+			want:     "claude --resume " + sid,
+			noteHas:  []string{"dropped --settings (inline JSON", "dropped --mcp-config (inline JSON"},
+			noteNone: []string{"Bash(*)"},
+		},
+		{
+			name: "settings file path is still replayed",
+			sess: model.Session{Cwd: dir, Launch: &model.Launch{Argv: []string{"claude", "--settings", mcp}}},
+			want: "claude --resume " + sid + " --settings " + mcp,
 		},
 		{
 			name: "value flag at end of argv without value is ignored",
@@ -493,6 +543,9 @@ func TestBuildResumeArgv(t *testing.T) {
 			for _, a := range argv {
 				if strings.Contains(a, "bypassPermissions") || strings.Contains(a, "dangerously-skip") {
 					t.Errorf("argv leaks bypass: %v", argv)
+				}
+				if strings.Contains(a, "{") || strings.Contains(a, "[") {
+					t.Errorf("argv replays inline JSON: %v", argv)
 				}
 			}
 			for _, s := range tc.noteHas {
@@ -543,13 +596,30 @@ func TestNewTerminalTabScript(t *testing.T) {
 		"activate",
 		"if (count of windows) is 0 then",
 		"do script " + wantLine + "\n",
-		`keystroke "t" using command down`,
-		"do script " + wantLine + " in front window",
+		"set tabsBefore to count of tabs of front window",
+		"try\n\t\t\ttell application \"System Events\" to keystroke \"t\" using command down\n\t\tend try",
+		"repeat 20 times",
+		"delay 0.1",
+		"if (count of tabs of front window) > tabsBefore then",
+		"set tabOpened to true",
+		"if tabOpened then\n\t\t\tdo script " + wantLine + " in front window\n\t\telse\n\t\t\tdo script " + wantLine + "\n\t\tend if",
 		"end tell",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q:\n%s", want, s)
 		}
+	}
+	// The count is taken before the keystroke and the command only runs in
+	// the front window after the tab count grew.
+	iBefore := strings.Index(s, "set tabsBefore")
+	iKey := strings.Index(s, "keystroke")
+	iPoll := strings.Index(s, "> tabsBefore")
+	iRun := strings.Index(s, "in front window")
+	if !(iBefore < iKey && iKey < iPoll && iPoll < iRun) {
+		t.Errorf("script steps out of order:\n%s", s)
+	}
+	if strings.Contains(s, "delay 0.3") {
+		t.Errorf("fixed delay must be replaced by polling:\n%s", s)
 	}
 	// backslashes are escaped for AppleScript
 	s = NewTerminalTabScript("/tmp", `echo a\b`)
@@ -630,6 +700,74 @@ func TestRunPrintAndErrors(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	if err := Run(&Action{Kind: KindResume, Cwd: t.TempDir(), Argv: []string{"claude", "--resume", sid}}); err == nil {
 		t.Errorf("missing claude on PATH must fail")
+	}
+}
+
+func TestRunPrintsNoteBeforeResume(t *testing.T) {
+	t.Setenv("RECALL_DRY_RUN", "")
+	t.Setenv("PATH", t.TempDir())
+	var out, errBuf bytes.Buffer
+	oldOut, oldErr := Stdout, Stderr
+	Stdout, Stderr = &out, &errBuf
+	t.Cleanup(func() { Stdout, Stderr = oldOut, oldErr })
+
+	a := &Action{Kind: KindResume, SID: sid, Cwd: t.TempDir(), Argv: []string{"claude", "--resume", sid}, Note: "2 background job(s) were lost; dropped --add-dir /gone (path missing)"}
+	// claude is not on PATH so Run fails after the note is printed.
+	if err := Run(a); err == nil {
+		t.Fatal("expected exec failure")
+	}
+	if got := errBuf.String(); got != "recall: "+a.Note+"\n" {
+		t.Errorf("stderr = %q, want the note line", got)
+	}
+	if out.Len() != 0 {
+		t.Errorf("note must go to stderr, stdout = %q", out.String())
+	}
+
+	errBuf.Reset()
+	if err := Run(&Action{Kind: KindResume, Argv: []string{"claude"}}); err == nil {
+		t.Fatal("expected exec failure")
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("empty note must print nothing, got %q", errBuf.String())
+	}
+
+	// PrintNote is what callers that exec themselves use.
+	errBuf.Reset()
+	PrintNote(&errBuf, &Action{Kind: KindPrint, Note: "x"})
+	PrintNote(&errBuf, nil)
+	PrintNote(&errBuf, &Action{Kind: KindAttach, Note: ""})
+	if errBuf.Len() != 0 {
+		t.Errorf("print kind, nil and empty notes must print nothing, got %q", errBuf.String())
+	}
+	PrintNote(&errBuf, &Action{Kind: KindAttach, Note: "kept"})
+	if errBuf.String() != "recall: kept\n" {
+		t.Errorf("PrintNote = %q", errBuf.String())
+	}
+}
+
+func TestPlanRecordsSID(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "")
+	dir := t.TempDir()
+	for _, sess := range []*model.Session{
+		{ID: sid, Cwd: dir},
+		{ID: sid, Cwd: dir, Live: &model.Live{Alive: true, PID: 4242, HostApp: "Terminal", TTY: "ttys007"}},
+		{ID: sid, Cwd: dir, Live: &model.Live{Alive: true, PID: 99, HostApp: "Cursor"}},
+		{ID: sid, Cwd: dir, Live: &model.Live{Alive: true, Mux: &model.MuxInfo{SessionName: "rc-0f1e2d3c"}}},
+	} {
+		a, err := Plan(sess, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.SID != sid {
+			t.Errorf("%s action carries SID %q, want %q", a.Kind, a.SID, sid)
+		}
+	}
+	a, err := Plan(nil, Options{Cwd: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.SID != "" {
+		t.Errorf("new session must not carry a SID, got %q", a.SID)
 	}
 }
 

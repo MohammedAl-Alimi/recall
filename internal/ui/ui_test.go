@@ -29,6 +29,7 @@ type fakeBackend struct {
 	openedOpts []launch.Options
 	openErr    error
 	notified   int
+	released   []string
 }
 
 func (f *fakeBackend) Load(ctx context.Context, includeGhosts bool) error {
@@ -67,6 +68,8 @@ func (f *fakeBackend) Open(sess *model.Session, opts launch.Options) (*launch.Ac
 	}
 	return &launch.Action{Kind: "resume", Cwd: sessionDir(sess), Argv: argv, Description: "resume " + sess.Short()}, nil
 }
+
+func (f *fakeBackend) ReleaseLock(sid string) { f.released = append(f.released, sid) }
 
 func (f *fakeBackend) PreselectForCwd() *model.Session { return nil }
 
@@ -497,6 +500,124 @@ func TestOpenVariantsPassOptions(t *testing.T) {
 	press(m, "enter")
 	if !strings.Contains(m.status, "locked by another recall") {
 		t.Errorf("open error should reach the status bar: %q", m.status)
+	}
+}
+
+// Enter resumes in this terminal (the TUI quits, claude is exec'ed) while o
+// asks for a new tab, so the two keys never do the same thing.
+func TestEnterResumesInPlaceAndOOpensTab(t *testing.T) {
+	m, fb := newTestModel(t)
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	press(m, "enter")
+	press(m, "o")
+	if len(fb.openedOpts) != 2 {
+		t.Fatalf("want 2 opens, got %d", len(fb.openedOpts))
+	}
+	enter, tab := fb.openedOpts[0], fb.openedOpts[1]
+	if !enter.InPlace || enter.NewTab {
+		t.Errorf("Enter must ask for an in-place resume, got %+v", enter)
+	}
+	if !tab.NewTab || tab.InPlace {
+		t.Errorf("o must ask for a new tab, got %+v", tab)
+	}
+	// The real planner honours InPlace even in Terminal.app.
+	sess := m.rows[2]
+	act, err := launch.Plan(sess, enter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if act.Script != "" || !needsTerminal(act) {
+		t.Errorf("Enter in Terminal.app must plan an in-place resume, got script:\n%s", act.Script)
+	}
+	act, err = launch.Plan(sess, tab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if act.Script == "" || needsTerminal(act) {
+		t.Errorf("o in Terminal.app must plan a new tab script")
+	}
+}
+
+// The loss note is part of the status shown before the action runs and
+// buys a longer look.
+func TestSpawnShowsLossNoteLonger(t *testing.T) {
+	m, _ := newTestModel(t)
+	var delays []time.Duration
+	tickFn = func(d time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+		delays = append(delays, d)
+		return func() tea.Msg { return fn(fixedNow.Add(d)) }
+	}
+	plain := &launch.Action{Kind: "resume", SID: "s1", Cwd: "/tmp", Argv: []string{"claude", "--resume", "s1"}}
+	m.spawn(plain)
+	if m.status != "$ cd /tmp && claude --resume s1" {
+		t.Errorf("status without note = %q", m.status)
+	}
+	noted := &launch.Action{Kind: "resume", SID: "s1", Cwd: "/tmp", Argv: []string{"claude", "--resume", "s1"}, Note: "2 background job(s) were lost; dropped --add-dir /gone (path missing)"}
+	m.spawn(noted)
+	if !strings.HasPrefix(m.status, "note: 2 background job(s) were lost; dropped --add-dir /gone (path missing)") || !strings.Contains(m.status, "$ cd /tmp && claude --resume s1") {
+		t.Errorf("status with note = %q", m.status)
+	}
+	if len(delays) != 2 || delays[0] != spawnDelay || delays[1] != noteDelay {
+		t.Errorf("delays = %v, want [%v %v]", delays, spawnDelay, noteDelay)
+	}
+	if noteDelay <= spawnDelay {
+		t.Errorf("noteDelay %v must be longer than spawnDelay %v", noteDelay, spawnDelay)
+	}
+}
+
+// A new-tab resume whose osascript fails must give the session lock back
+// and tell the user how to get out of it; a successful hand-off releases it
+// too because the other tab's claude cannot inherit it.
+func TestNewTabFailureReleasesLockWithHint(t *testing.T) {
+	m, fb := newTestModel(t)
+	launchRunFn = func(a *launch.Action) error {
+		return errors.New("osascript: System Events got an error: osascript is not allowed to send keystrokes")
+	}
+	t.Cleanup(func() { launchRunFn = launch.Run })
+	act := &launch.Action{Kind: "resume", SID: "sid-1", Cwd: "/tmp", Argv: []string{"claude", "--resume", "sid-1"}, Script: "tell application \"Terminal\"", Description: "resume sid-1 (new Terminal tab)"}
+	_, cmd := m.runAction(act)
+	if cmd == nil {
+		t.Fatal("script action should run inside the program")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); ok {
+		t.Fatal("script action must not quit the UI")
+	}
+	if len(fb.released) != 1 || fb.released[0] != "sid-1" {
+		t.Errorf("lock not released after failure: %v", fb.released)
+	}
+	m.Update(msg)
+	for _, want := range []string{"not allowed to send keystrokes", "grant Terminal accessibility", "press Enter to resume here"} {
+		if !strings.Contains(m.status, want) {
+			t.Errorf("status %q lacks %q", m.status, want)
+		}
+	}
+
+	fb.released = nil
+	launchRunFn = func(a *launch.Action) error { return nil }
+	it := &launch.Action{Kind: "resume", SID: "sid-2", Script: "tell application \"iTerm2\"", Description: "resume sid-2 (new iTerm2 tab)"}
+	_, cmd = m.runAction(it)
+	m.Update(cmd())
+	if len(fb.released) != 1 || fb.released[0] != "sid-2" {
+		t.Errorf("lock not released after a successful hand-off: %v", fb.released)
+	}
+	if m.status != "resume sid-2 (new iTerm2 tab)" {
+		t.Errorf("status = %q", m.status)
+	}
+	if scriptHost(it) != "iTerm2" || scriptHost(act) != "Terminal" {
+		t.Errorf("scriptHost wrong")
+	}
+
+	// Focus actions never touch a lock.
+	fb.released = nil
+	launchRunFn = func(a *launch.Action) error { return errors.New("no window") }
+	_, cmd = m.runAction(&launch.Action{Kind: "focus", SID: "sid-3", Script: "x"})
+	m.Update(cmd())
+	if len(fb.released) != 0 {
+		t.Errorf("focus must not release a lock: %v", fb.released)
+	}
+	if strings.Contains(m.status, "accessibility") {
+		t.Errorf("focus failure must not carry the tab hint: %q", m.status)
 	}
 }
 

@@ -33,7 +33,11 @@ type Options struct {
 // Action is a planned, not yet executed, open operation.
 type Action struct {
 	// Kind is one of "focus", "attach", "resume", "new", "print".
-	Kind        string
+	Kind string
+	// SID is the session the action was planned for (empty for a new
+	// session). Callers use it to release the session lock when a launch
+	// fails or when the session was handed to another terminal tab.
+	SID         string
 	Cwd         string
 	Argv        []string
 	Script      string
@@ -53,6 +57,10 @@ const (
 // Stdout receives dry-run and print output. Tests swap it for a buffer.
 var Stdout io.Writer = os.Stdout
 
+// Stderr receives the loss note printed right before a session is resumed,
+// attached or started. Tests swap it for a buffer.
+var Stderr io.Writer = os.Stderr
+
 // DefaultMuxSocket is the tmux socket name used when a live session carries
 // no MuxInfo socket. It mirrors mux.NewTmux().Socket.
 const DefaultMuxSocket = "recall"
@@ -67,7 +75,7 @@ const contextWarnTokens = 500_000
 //  2. live and kept in tmux: attach.
 //  3. live in Terminal.app with a known tty: focus that tab.
 //  4. live inside Cursor, VS Code, or any other host: print a hint.
-//  5. closed: resume, in a new tab when the terminal supports it.
+//  5. closed: resume in place, or in a new tab when opts.NewTab is set.
 //
 // opts.Fork bypasses the live tiers because a fork never touches the
 // running process. A nil sess plans a fresh session (see PlanNew).
@@ -132,6 +140,7 @@ func planLive(sess *model.Session, opts Options) (*Action, error) {
 		}
 		a := &Action{
 			Kind:        KindAttach,
+			SID:         sess.ID,
 			Argv:        []string{"tmux", "-L", socket, "attach-session", "-t", lv.Mux.SessionName},
 			Description: fmt.Sprintf("attach to kept session %s (tmux %s)", model.ShortID(sess.ID), lv.Mux.SessionName),
 		}
@@ -150,6 +159,7 @@ func planLive(sess *model.Session, opts Options) (*Action, error) {
 		if lv.TTY != "" {
 			return &Action{
 				Kind:        KindFocus,
+				SID:         sess.ID,
 				Script:      FocusTerminalScript(lv.TTY),
 				Description: fmt.Sprintf("focus Terminal.app tab %s (pid %d)", ttyPath(lv.TTY), lv.PID),
 			}, nil
@@ -158,6 +168,7 @@ func planLive(sess *model.Session, opts Options) (*Action, error) {
 		if lv.TTY != "" {
 			return &Action{
 				Kind:        KindFocus,
+				SID:         sess.ID,
 				Script:      FocusITermScript(lv.TTY),
 				Description: fmt.Sprintf("focus iTerm2 tab %s (pid %d)", ttyPath(lv.TTY), lv.PID),
 			}, nil
@@ -180,6 +191,7 @@ func planLive(sess *model.Session, opts Options) (*Action, error) {
 	_, argv, _ := BuildResume(sess, Options{Fork: true})
 	return &Action{
 		Kind:        KindPrint,
+		SID:         sess.ID,
 		Argv:        argv,
 		Description: desc + "; " + hint,
 		Note:        "a fork would resume a copy: " + strings.Join(quoteAll(argv), " "),
@@ -190,6 +202,7 @@ func planResume(sess *model.Session, opts Options) (*Action, error) {
 	cwd, argv, note := BuildResume(sess, opts)
 	a := &Action{
 		Kind:        KindResume,
+		SID:         sess.ID,
 		Cwd:         cwd,
 		Argv:        argv,
 		Note:        note,
@@ -207,19 +220,18 @@ func planResume(sess *model.Session, opts Options) (*Action, error) {
 	return a, nil
 }
 
-// decorateSpawn decides between a new terminal tab and an in-place exec and
-// attaches the osascript when a new tab is wanted.
+// decorateSpawn attaches the osascript for a new terminal tab when one was
+// asked for. The default is an in-place exec in the caller's terminal, so
+// Enter in the list and 'recall open' resume right here; opts.NewTab (the o
+// key, --new-tab) opens a Terminal.app or iTerm2 tab instead. opts.InPlace
+// is accepted for explicitness and wins over NewTab.
 func decorateSpawn(a *Action, opts Options) {
+	if !opts.NewTab || opts.InPlace {
+		return
+	}
 	term := opts.TermProgram
 	if term == "" {
 		term = os.Getenv("TERM_PROGRAM")
-	}
-	newTab := opts.NewTab
-	if !opts.NewTab && !opts.InPlace {
-		newTab = term == "Apple_Terminal" || strings.HasPrefix(term, "iTerm")
-	}
-	if !newTab {
-		return
 	}
 	cmd := strings.Join(quoteAll(a.Argv), " ")
 	switch {
@@ -280,6 +292,7 @@ func Run(a *Action) error {
 		}
 		return runOsascript(a.Script)
 	case KindAttach, KindResume, KindNew:
+		PrintNote(Stderr, a)
 		if a.Script != "" {
 			return runOsascript(a.Script)
 		}
@@ -287,6 +300,17 @@ func Run(a *Action) error {
 	default:
 		return fmt.Errorf("launch: unknown action kind %q", a.Kind)
 	}
+}
+
+// PrintNote writes the loss note of a as "recall: <note>" to w so the user
+// sees what will not be replayed before claude takes over the terminal. It
+// prints nothing for a nil action, an empty note or a print action, whose
+// note is part of its own output.
+func PrintNote(w io.Writer, a *Action) {
+	if w == nil || a == nil || a.Note == "" || a.Kind == KindPrint {
+		return
+	}
+	fmt.Fprintln(w, "recall: "+a.Note)
 }
 
 // execInPlace replaces the current process with a.Argv after chdir to a.Cwd.
@@ -419,7 +443,7 @@ func BuildResume(sess *model.Session, opts Options) (cwd string, argv []string, 
 		replayed, dropped, hasMCP := replayFlags(sess.Launch.Argv)
 		argv = append(argv, replayed...)
 		for _, d := range dropped {
-			notes = append(notes, "dropped "+d+" (path missing)")
+			notes = append(notes, "dropped "+d)
 		}
 		if hasMCP {
 			notes = append(notes, "MCP servers reconnect on resume")
@@ -466,8 +490,10 @@ func pickCwd(sess *model.Session) (cwd string, missing string) {
 }
 
 // replayFlags extracts the allowlisted flags from a recorded argv. It drops
-// path flags whose argument no longer exists and reports whether an MCP
-// config was involved.
+// path flags whose argument no longer exists, drops inline JSON given to
+// --settings or --mcp-config, and reports whether an MCP config was
+// involved. Each dropped entry is a short reason without the value when the
+// value was inline JSON, which may carry permissions or secrets.
 func replayFlags(orig []string) (out []string, dropped []string, hasMCP bool) {
 	args := orig
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -499,10 +525,14 @@ func replayFlags(orig []string) (out []string, dropped []string, hasMCP bool) {
 			if flag == "--mcp-config" {
 				hasMCP = true
 			}
+			if isInlineJSON(val) {
+				dropped = append(dropped, flag+" (inline JSON is not replayed)")
+				continue
+			}
 			if pathArgExists(flag, val) {
 				out = append(out, flag, val)
 			} else {
-				dropped = append(dropped, flag+" "+val)
+				dropped = append(dropped, flag+" "+val+" (path missing)")
 			}
 		case replayValueFlags[flag]:
 			if !hasVal {
@@ -524,15 +554,17 @@ func replayFlags(orig []string) (out []string, dropped []string, hasMCP bool) {
 	return out, dropped, hasMCP
 }
 
-// pathArgExists validates a path flag. --mcp-config and --settings also
-// accept inline JSON, which is replayed as is.
+// isInlineJSON reports whether a --settings or --mcp-config value is a JSON
+// document rather than a path. Inline settings can switch the permission
+// mode to bypassPermissions and inline MCP config can carry env secrets, so
+// neither is ever put back on a command line.
+func isInlineJSON(val string) bool {
+	t := strings.TrimSpace(val)
+	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
+}
+
+// pathArgExists validates a path flag argument.
 func pathArgExists(flag, val string) bool {
-	if flag == "--mcp-config" || flag == "--settings" {
-		t := strings.TrimSpace(val)
-		if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
-			return true
-		}
-	}
 	if flag == "--add-dir" {
 		// --add-dir accepts several comma separated dirs in some versions.
 		for _, d := range strings.Split(val, ",") {
@@ -622,9 +654,13 @@ end tell
 // in cwd and runs shellCommand.
 //
 // Terminal.app has no scripting verb for a new tab, so when a window exists
-// the script sends Command-T through System Events and then runs the command
-// in the front window, which is now the new tab. Without any window a plain
-// 'do script' opens a new one.
+// the script remembers the tab count of the front window, sends Command-T
+// through System Events and polls until that count grows. Only then does it
+// run the command in the front window, which is now the new tab. When the
+// keystroke was refused (no Accessibility permission) or no tab appeared in
+// time, the script falls back to a plain 'do script', which opens a new
+// window, so the command line is never typed into the tab that runs recall.
+// Without any window a plain 'do script' opens a new one straight away.
 func NewTerminalTabScript(cwd, shellCommand string) string {
 	line := appleString(shellLine(cwd, shellCommand))
 	return `tell application "Terminal"
@@ -632,13 +668,34 @@ func NewTerminalTabScript(cwd, shellCommand string) string {
 	if (count of windows) is 0 then
 		do script ` + line + `
 	else
-		tell application "System Events" to keystroke "t" using command down
-		delay 0.3
-		do script ` + line + ` in front window
+		set tabsBefore to count of tabs of front window
+		try
+			tell application "System Events" to keystroke "t" using command down
+		end try
+		set tabOpened to false
+		repeat ` + terminalTabPolls + ` times
+			delay ` + terminalTabPollDelay + `
+			if (count of tabs of front window) > tabsBefore then
+				set tabOpened to true
+				exit repeat
+			end if
+		end repeat
+		if tabOpened then
+			do script ` + line + ` in front window
+		else
+			do script ` + line + `
+		end if
 	end if
 end tell
 `
 }
+
+// terminalTabPolls and terminalTabPollDelay bound how long the Terminal.app
+// tab script waits for Command-T to take effect (20 x 0.1s = 2s).
+const (
+	terminalTabPolls     = "20"
+	terminalTabPollDelay = "0.1"
+)
 
 // NewITermTabScript returns AppleScript that opens a new iTerm2 tab in cwd
 // and runs shellCommand.

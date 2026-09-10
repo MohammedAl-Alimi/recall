@@ -27,9 +27,13 @@ const (
 	rescanEvery      = 10 * time.Second
 	confirmWindow    = 5 * time.Second
 	spawnDelay       = 1 * time.Second
-	statusFor        = 4 * time.Second
-	sideBySideWidth  = 120
-	rowHeight        = 3
+	// noteDelay replaces spawnDelay when the action carries a loss note
+	// (dropped flags, lost background jobs, ...) so it can be read before
+	// claude takes the screen.
+	noteDelay       = 4 * time.Second
+	statusFor       = 4 * time.Second
+	sideBySideWidth = 120
+	rowHeight       = 3
 )
 
 // RunOptions configures the TUI start.
@@ -98,6 +102,9 @@ type backend interface {
 	RefreshLive(ctx context.Context) error
 	Visible(showHidden, showGhosts, showHeadless bool) []*model.Session
 	Open(sess *model.Session, opts launch.Options) (*launch.Action, error)
+	// ReleaseLock drops the session lock Open took, after a launch failed
+	// or after the session was handed to another terminal tab.
+	ReleaseLock(sid string)
 	PreselectForCwd() *model.Session
 	NotifyNeedsYou(prev map[string]model.State)
 }
@@ -584,7 +591,12 @@ func (m *Model) perform(act action) (tea.Model, tea.Cmd) {
 func (m *Model) performOn(act action, sess *model.Session) (tea.Model, tea.Cmd) {
 	switch act {
 	case actOpen:
-		return m.open(sess, m.baseOptions())
+		// Enter resumes right here: the TUI quits and claude takes over this
+		// terminal. Live tiers (focus, attach) are unaffected. A new tab is
+		// reserved for o.
+		o := m.baseOptions()
+		o.InPlace = true
+		return m.open(sess, o)
 	case actNewTab:
 		o := m.baseOptions()
 		o.NewTab = true
@@ -688,9 +700,12 @@ func (m *Model) open(sess *model.Session, opts launch.Options) (tea.Model, tea.C
 }
 
 // spawn shows the command in the status bar for spawnDelay, then runs it.
+// When the action carries a loss note (dropped flags, lost background jobs,
+// a missing directory) the note leads the status line and the wait grows to
+// noteDelay so it can be read before claude takes the screen.
 func (m *Model) spawn(act *launch.Action) (tea.Model, tea.Cmd) {
 	m.pendingAction = act
-	text := actionCommandText(act)
+	text := spawnStatusText(act)
 	m.status = text
 	m.statusUntil = m.now().Add(time.Hour)
 	if act.Kind == "print" {
@@ -701,18 +716,45 @@ func (m *Model) spawn(act *launch.Action) (tea.Model, tea.Cmd) {
 		}
 		return m, m.setStatus(msg)
 	}
-	return m, tickFn(spawnDelay, func(time.Time) tea.Msg { return runActionMsg{act: act} })
+	delay := spawnDelay
+	if act.Note != "" {
+		delay = noteDelay
+	}
+	return m, tickFn(delay, func(time.Time) tea.Msg { return runActionMsg{act: act} })
+}
+
+// spawnStatusText is the status shown while an action waits to run: the
+// exact command, led by the loss note when there is one so the warning is
+// never cut off by a long command line.
+func spawnStatusText(act *launch.Action) string {
+	text := actionCommandText(act)
+	if act == nil || act.Note == "" || act.Kind == "print" {
+		return text
+	}
+	return "note: " + act.Note + "  " + text
 }
 
 // runAction either quits so the caller can exec in the terminal, or runs
 // the action in the background (osascript focus, new tab) and stays open.
+//
+// A resume that runs through osascript (new tab) holds the session lock in
+// this process while claude lives in another tab, and a failed osascript
+// (no Accessibility permission for the terminal) would keep it forever, so
+// the lock is released either way once the script has run.
 func (m *Model) runAction(act *launch.Action) (tea.Model, tea.Cmd) {
 	if needsTerminal(act) {
 		return m, tea.Quit
 	}
 	m.pendingAction = nil
+	be := m.be
 	return m, func() tea.Msg {
 		err := launchRunFn(act)
+		if act.SID != "" && act.Script != "" && act.Kind != "focus" && be != nil {
+			be.ReleaseLock(act.SID)
+		}
+		if err != nil && act.Script != "" && act.Kind != "focus" {
+			return actionDoneMsg{err: fmt.Errorf("%w; grant %s accessibility in System Settings, or press Enter to resume here", err, scriptHost(act))}
+		}
 		text := ""
 		if err == nil {
 			text = act.Description
@@ -722,6 +764,14 @@ func (m *Model) runAction(act *launch.Action) (tea.Model, tea.Cmd) {
 		}
 		return actionDoneMsg{err: err, text: text}
 	}
+}
+
+// scriptHost names the terminal app an osascript action drives, for hints.
+func scriptHost(act *launch.Action) string {
+	if act != nil && strings.Contains(act.Script, `"iTerm2"`) {
+		return "iTerm2"
+	}
+	return "Terminal"
 }
 
 // needsTerminal reports whether an action must take over the terminal after

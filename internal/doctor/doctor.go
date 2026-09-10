@@ -312,11 +312,11 @@ func checkTerminal() Check {
 	tp := os.Getenv("TERM_PROGRAM")
 	switch tp {
 	case "":
-		return Check{Name: "terminal", Status: "warn", Detail: "TERM_PROGRAM not set; new tabs and focus need Terminal.app or iTerm2"}
+		return Check{Name: "terminal", Status: "warn", Detail: "TERM_PROGRAM not set; Enter resumes here, tab focus and o (new tab) need Terminal.app or iTerm2"}
 	case "Apple_Terminal", "iTerm.app":
-		return Check{Name: "terminal", Status: "ok", Detail: tp + " (tab focus and new tab supported)"}
+		return Check{Name: "terminal", Status: "ok", Detail: tp + " (Enter resumes here; live tabs are focused; o and --new-tab open a new tab)"}
 	default:
-		return Check{Name: "terminal", Status: "ok", Detail: tp + " (opens in place; no tab focus)"}
+		return Check{Name: "terminal", Status: "ok", Detail: tp + " (Enter resumes here; no tab focus or new tab)"}
 	}
 }
 
