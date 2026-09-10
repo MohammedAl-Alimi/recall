@@ -16,6 +16,30 @@ All notable changes to recall are recorded here. The format follows
   cmux workspace, from the dashboard button or with `--terminal cmux`.
 - `--terminal terminal|iterm|cmux` on `recall open` and `recall new`, to
   choose where a session opens instead of following the current terminal.
+- `recall service`: the dashboard and the archive as background jobs. On
+  macOS `recall service install` writes two launchd user agents,
+  `dev.recall.serve` and `dev.recall.archive`, each step asking y/N unless
+  `--yes` is passed. `--serve` and `--archive` install one of them,
+  `--addr` moves the dashboard off 127.0.0.1:4747 and `--at HH:MM` moves the
+  daily run off 09:00. `recall service status` reports installed, loaded and
+  the pid; `recall service uninstall` boots both out and removes their
+  property lists. Other platforms refuse and print the command to put into a
+  systemd user unit instead. `RECALL_DRY_RUN=1` prints the property lists and
+  the launchctl calls without writing or loading anything.
+- The dashboard as a login service. The serve agent runs
+  `recall serve --no-open` at login and is restarted after an unclean exit.
+  Because the token is stored in the recall directory, the address is stable:
+  `recall service url` prints the full bookmarkable URL on one line, ready to
+  paste into a browser or link from another dashboard.
+- A daily archive. The archive agent runs `recall archive --all --quiet` once
+  a day. It is the layer under retention and the SessionEnd hook: the hook
+  only archives a session that ends cleanly, a session left open for weeks
+  never ends, and a reset retention setting cannot take back what is already
+  archived.
+- `recall archive --quiet`: one summary line instead of one line per session,
+  and no output at all when nothing changed. Archiving now skips a session
+  whose archive already matches the transcript on disk, so `archive --all` is
+  cheap to repeat and the daily job stays silent on a quiet day.
 - Prebuilt binaries for macOS and Linux on both architectures, a Homebrew
   tap, and download links in the README.
 
