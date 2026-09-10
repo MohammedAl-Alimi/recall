@@ -16,8 +16,9 @@ import (
 )
 
 // defaultRetentionDays is what setup proposes for cleanupPeriodDays when the
-// user has not set one. Claude's own default is 30 days.
-const defaultRetentionDays = 365
+// user has not set one: ten years, which is effectively never. Claude's own
+// default is 30 days. 'recall doctor' suggests the same number.
+const defaultRetentionDays = 3650
 
 // claudeDefaultRetention is the value Claude Code uses when the key is unset.
 const claudeDefaultRetention = 30
@@ -143,7 +144,7 @@ func newSetupCmd() *cobra.Command {
 		Long: `setup walks through three changes and asks before each one:
 
   retention  set cleanupPeriodDays in settings.json so Claude stops deleting
-             transcripts after 30 days (default proposal: 365)
+             transcripts after 30 days (default proposal: 3650, ten years)
   widget     add a Ctrl-G binding to your shell rc file
   hooks      add SessionStart/SessionEnd/Notification hooks to settings.json
              so recall can record launch flags and archive on exit

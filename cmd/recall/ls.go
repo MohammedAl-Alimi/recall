@@ -124,7 +124,7 @@ func writeLsTable(w io.Writer, list []*model.Session, now time.Time) {
 			title = s.Label + ": " + title
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			s.Short(), s.State.Word(), humanAge(now, s.LastActive), projectName(s), s.Branch, truncate(title, 60))
+			s.Short(), s.State.Word(), humanAge(now, s.LastActive), truncate(projectName(s), 28), truncate(s.Branch, 24), truncate(title, 60))
 	}
 	tw.Flush()
 }

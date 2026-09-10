@@ -35,7 +35,7 @@ laptops get rebooted, and the session where the fix was half done is gone.
 recall fixes three things:
 
 1. **Nothing gets deleted behind your back.** `recall setup` raises Claude's
-   `cleanupPeriodDays` (you choose the number) and archives transcripts under
+   `cleanupPeriodDays` (ten years by default, or any number you choose) and archives transcripts under
    `~/.recall` so a session can be resumed months later.
 2. **One list, every project.** Title, project, branch, last prompt, last
    answer, open PRs, whether it is live, waiting for you, or long gone.
