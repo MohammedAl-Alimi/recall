@@ -41,7 +41,7 @@ func mockupSessions() []*model.Session {
 			ID: "2b3c4d5e-1111-4222-8333-444444444444", Title: "Fix flaky calendar popover test",
 			WorkCwd: "/Users/me/dev/lcc", Cwd: "/Users/me/dev/lcc", Branch: "main",
 			LastAssistant: "Fixed the race by cancelling the previous timer.",
-			LastActive: fixedNow.Add(-3 * time.Hour), State: model.StateClosed,
+			LastActive:    fixedNow.Add(-3 * time.Hour), State: model.StateClosed,
 		},
 		{
 			ID: "3c4d5e6f-1111-4222-8333-444444444444", Title: "ETF savings plan rebalance",
