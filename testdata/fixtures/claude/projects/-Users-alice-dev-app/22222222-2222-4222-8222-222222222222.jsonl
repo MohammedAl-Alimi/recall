@@ -1,0 +1,8 @@
+{"type":"mode","mode":"plan","sessionId":"22222222-2222-4222-8222-222222222222"}
+{"type":"permission-mode","permissionMode":"plan","sessionId":"22222222-2222-4222-8222-222222222222"}
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/Users/alice/dev/app","sessionId":"22222222-2222-4222-8222-222222222222","version":"2.1.227","gitBranch":"main","type":"user","message":{"role":"user","content":"Plan the migration to the new config format"},"uuid":"u-1","timestamp":"2026-02-01T10:00:00.000Z","entrypoint":"claude-desktop","promptId":"p-1"}
+{"parentUuid":"u-1","isSidechain":false,"userType":"external","cwd":"/Users/alice/dev/app","sessionId":"22222222-2222-4222-8222-222222222222","version":"2.1.227","gitBranch":"main","type":"assistant","uuid":"a-1","timestamp":"2026-02-01T10:00:06.000Z","message":{"id":"msg-1","type":"message","role":"assistant","model":"claude-synth-1","content":[{"type":"text","text":"Here is a three step plan."}],"stop_reason":"end_turn","usage":{"input_tokens":30,"cache_creation_input_tokens":500,"cache_read_input_tokens":2000,"output_tokens":120}},"requestId":"req-1","entrypoint":"claude-desktop"}
+{"type":"ai-title","aiTitle":"Config format migration plan","sessionId":"22222222-2222-4222-8222-222222222222"}
+{"type":"agent-name","agentName":"planner","sessionId":"22222222-2222-4222-8222-222222222222"}
+{"type":"custom-title","customTitle":"Config migration (renamed by hand)","sessionId":"22222222-2222-4222-8222-222222222222"}
+{"type":"last-prompt","lastPrompt":"Plan the migration to the new config format","leafUuid":"a-1","sessionId":"22222222-2222-4222-8222-222222222222"}
