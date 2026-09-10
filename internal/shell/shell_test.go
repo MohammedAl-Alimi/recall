@@ -2,6 +2,7 @@ package shell
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -182,5 +183,30 @@ func TestDetect(t *testing.T) {
 	t.Setenv("SHELL", "/bin/tcsh")
 	if sh, rc = Detect(); sh != "" || rc != "" {
 		t.Fatalf("tcsh: %q %q", sh, rc)
+	}
+}
+
+// TestSnippetsParse feeds each snippet to its shell's syntax checker when
+// that shell is installed. Nothing is executed or sourced.
+func TestSnippetsParse(t *testing.T) {
+	cases := map[string][]string{
+		"zsh":  {"zsh", "-n"},
+		"bash": {"bash", "-n"},
+		"fish": {"fish", "--no-execute"},
+	}
+	for sh, cmd := range cases {
+		bin, err := exec.LookPath(cmd[0])
+		if err != nil {
+			t.Logf("%s not installed, skipping parse check", sh)
+			continue
+		}
+		f := filepath.Join(t.TempDir(), "snippet")
+		if err := os.WriteFile(f, []byte(Widget(sh)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(bin, append(cmd[1:], f)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s rejected snippet: %v\n%s", sh, err, out)
+		}
 	}
 }
