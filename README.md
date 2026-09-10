@@ -173,8 +173,9 @@ States, in the order they sort:
 | --- | --- | --- |
 | `●` amber | Needs you | Live and waiting for a permission or an answer |
 | `●` green | Running | Live: idle, busy, kept in tmux, or a background job |
-| `○` | Closed | Transcript on disk, no process; resume with Enter |
-| `◌` | Gone | Transcript deleted (ghost) or past retention with no archive |
+| `·` | Closed | Transcript on disk, no process; resume with Enter |
+| `◔` amber | Expiring | Transcript still on disk and resumable, but within 2 days of `cleanupPeriodDays`; press `a` to archive before Claude deletes it |
+| `○` | Gone | Transcript deleted (ghost) or a background session whose daemon died |
 
 ## Privacy
 

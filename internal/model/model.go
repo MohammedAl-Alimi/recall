@@ -31,13 +31,26 @@ func (s State) Word() string {
 		return "Needs you"
 	case StateLiveIdle, StateLiveBusy, StateKept, StateBG, StateForeign:
 		return "Running"
-	case StateGhost, StateStale, StateBGStale:
+	case StateStale:
+		return "Expiring"
+	case StateGhost, StateBGStale:
 		return "Gone"
 	case StateClosed, StateInterrupted, StateArchived, StateHeadless:
 		return "Closed"
 	default:
 		return "Closed"
 	}
+}
+
+// Hint returns a short per-row nudge for states where the user can still act
+// before something is lost, or "" when there is nothing to add. A stale
+// session still has its transcript on disk and resumes fine; the hint tells
+// the user how to keep it past retention.
+func (s State) Hint() string {
+	if s == StateStale {
+		return "a archives before deletion"
+	}
+	return ""
 }
 
 // IsLive reports whether the state means a claude process is currently running.

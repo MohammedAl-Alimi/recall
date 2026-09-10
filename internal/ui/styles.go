@@ -39,6 +39,7 @@ type styles struct {
 	running   lipgloss.Style
 	closed    lipgloss.Style
 	gone      lipgloss.Style
+	expiring  lipgloss.Style
 	pendingOp lipgloss.Style
 }
 
@@ -75,6 +76,7 @@ func newStyles(color bool) styles {
 	s.running = lipgloss.NewStyle().Foreground(colorGreen)
 	s.closed = lipgloss.NewStyle().Foreground(colorDim)
 	s.gone = lipgloss.NewStyle().Foreground(colorDimmer)
+	s.expiring = lipgloss.NewStyle().Foreground(colorYellow)
 	s.pendingOp = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
 	return s
 }
@@ -88,6 +90,8 @@ func (s styles) forState(st model.State) lipgloss.Style {
 		return s.running
 	case "Gone":
 		return s.gone
+	case "Expiring":
+		return s.expiring
 	default:
 		return s.closed
 	}
@@ -103,6 +107,8 @@ func stateDot(st model.State) string {
 		return "●"
 	case "Gone":
 		return "○"
+	case "Expiring":
+		return "◔"
 	default:
 		return "·"
 	}

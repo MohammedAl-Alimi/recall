@@ -265,7 +265,7 @@ func TestStateColouring(t *testing.T) {
 		model.StateClosed:      string(colorDim),
 		model.StateInterrupted: string(colorDim),
 		model.StateGhost:       string(colorDimmer),
-		model.StateStale:       string(colorDimmer),
+		model.StateStale:       string(colorYellow),
 	}
 	for state, want := range cases {
 		fg := st.forState(state).GetForeground()
@@ -288,6 +288,30 @@ func TestStateColouring(t *testing.T) {
 		if !strings.Contains(row, state.Word()) {
 			t.Errorf("%s row lacks the state word: %q", state, row)
 		}
+	}
+}
+
+// A stale session still resumes; it must not read as Gone, and the row has
+// to say how to keep it.
+func TestStaleRowIsExpiringNotGone(t *testing.T) {
+	plain := newStyles(false)
+	sess := &model.Session{ID: "deadbeef-0000", Title: "old but resumable", Path: "/t", State: model.StateStale, LastActive: fixedNow.Add(-29 * 24 * time.Hour)}
+	row := renderRow(plain, sess, rowOpts{width: 100, now: fixedNow})
+	if strings.Contains(row, "Gone") {
+		t.Errorf("stale row reads as Gone: %q", row)
+	}
+	if !strings.Contains(row, "◔ Expiring") {
+		t.Errorf("stale row lacks the Expiring dot and word: %q", row)
+	}
+	if !strings.Contains(row, "a archives before deletion") {
+		t.Errorf("stale row lacks the archive hint: %q", row)
+	}
+	ghost := renderRow(plain, &model.Session{ID: "deadbeef-0001", Title: "x", Ghost: true, State: model.StateGhost, LastActive: fixedNow}, rowOpts{width: 100, now: fixedNow})
+	if !strings.Contains(ghost, "○ Gone") || strings.Contains(ghost, "a archives") {
+		t.Errorf("ghost row changed: %q", ghost)
+	}
+	if stateDot(model.StateStale) == stateDot(model.StateGhost) || stateDot(model.StateStale) == stateDot(model.StateClosed) {
+		t.Errorf("stale dot %q is not distinct", stateDot(model.StateStale))
 	}
 }
 

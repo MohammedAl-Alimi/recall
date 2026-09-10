@@ -204,6 +204,9 @@ func previewLines(st styles, sess *model.Session, width int, now time.Time) []st
 		title = sess.Label + "  " + st.dim.Render(title)
 	}
 	add(st.forState(sess.State).Render(stateDot(sess.State)+" "+sess.State.Word()) + "  " + st.title.Render(title))
+	if hint := sess.State.Hint(); hint != "" {
+		add(st.forState(sess.State).Render(hint))
+	}
 	add("")
 	field("id", sess.ID)
 	field("state", string(sess.State))

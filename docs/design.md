@@ -85,7 +85,7 @@ session. The plain word is always painted next to the dot.
 | `interrupted` | Closed | closed with a dangling tool_use at the end |
 | `headless` | Closed | `-p` or SDK session, hidden by default |
 | `archived` | Closed | transcript gone from projects, copy in `~/.recall/archive` |
-| `stale` | Gone | past `cleanupPeriodDays` with no archive |
+| `stale` | Expiring | transcript still on disk, last active within 2 days of `cleanupPeriodDays`, not archived; the row hints `a archives before deletion` |
 | `ghost` | Gone | only in history.jsonl |
 
 Sort order: needs_you first, then pinned, then last active descending.

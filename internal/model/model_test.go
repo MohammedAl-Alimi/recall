@@ -29,7 +29,7 @@ func TestStateWord(t *testing.T) {
 		StateForeign:     "Running",
 		StateBGStale:     "Gone",
 		StateGhost:       "Gone",
-		StateStale:       "Gone",
+		StateStale:       "Expiring",
 		StateClosed:      "Closed",
 		StateInterrupted: "Closed",
 		StateArchived:    "Closed",
@@ -40,6 +40,21 @@ func TestStateWord(t *testing.T) {
 		if got := s.Word(); got != want {
 			t.Errorf("%q.Word() = %q, want %q", s, got, want)
 		}
+	}
+}
+
+func TestStateHint(t *testing.T) {
+	if got := StateStale.Hint(); got != "a archives before deletion" {
+		t.Errorf("stale hint = %q", got)
+	}
+	for _, s := range []State{StateGhost, StateBGStale, StateClosed, StateNeedsYou, StateKept, StateArchived, State("unknown")} {
+		if got := s.Hint(); got != "" {
+			t.Errorf("%q.Hint() = %q, want empty", s, got)
+		}
+	}
+	// Stale must never share the ghost word: its transcript is still on disk.
+	if StateStale.Word() == StateGhost.Word() {
+		t.Errorf("stale and ghost share the word %q", StateStale.Word())
 	}
 }
 

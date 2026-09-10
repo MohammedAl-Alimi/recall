@@ -124,6 +124,14 @@ func renderRowLine2(st styles, sess *model.Session, o rowOpts, width int) string
 	narrow := width < narrowWidth
 
 	badges := rowBadges(st, sess)
+	if hint := sess.State.Hint(); hint != "" {
+		hint = st.forState(sess.State).Render(hint)
+		if badges == "" {
+			badges = hint
+		} else {
+			badges += "  " + hint
+		}
+	}
 	badgesW := lipgloss.Width(badges)
 	if badgesW > 0 {
 		badgesW += 2
