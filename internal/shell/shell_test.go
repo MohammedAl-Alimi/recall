@@ -20,7 +20,7 @@ func TestWidgetShapes(t *testing.T) {
 		if !strings.Contains(w, "alias rcl='recall'") {
 			t.Fatalf("%s: no rcl alias", sh)
 		}
-		if strings.Contains(w, "—") {
+		if strings.ContainsRune(w, 0x2014) {
 			t.Fatalf("%s: em dash in snippet", sh)
 		}
 	}
