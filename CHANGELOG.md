@@ -75,8 +75,10 @@ First release. Verified on macOS (Darwin 25.4, arm64) against Claude Code
   machine has no tmux, so the attach path is covered by unit tests only.
 - Tab focus and `--new-tab` are verified through dry-run AppleScript text,
   not by driving Terminal.app or iTerm2. iTerm2 is untested on a real install.
-- Linux builds compile and pass the unit tests but the focus and new-tab
-  tiers are macOS only; on Linux `open` falls back to resume in place.
+- Linux builds compile and pass the unit tests, but the focus and new-tab
+  tiers are macOS only: focus needs a Terminal.app or iTerm2 tty and
+  `--new-tab` always generates AppleScript. On Linux use the in-place resume
+  or a kept tmux session.
 - `setup`, `uninstall`, hook installation and retention writes were exercised
   only against temporary directories, never the real `~/.claude`.
 - Kept sessions survive a closed tab, not a reboot. Background shell jobs,
