@@ -101,10 +101,29 @@ func CmuxOpenArgv(cmuxPath, title, cwd, shellCommand string) []string {
 }
 
 // cmuxPing reports whether the cmux app answers on its socket.
+// ErrCmuxLocked is returned when the cmux socket refuses commands from
+// processes that were not started inside cmux. cmux calls this
+// socketControlMode "cmuxOnly"; it is a cmux setting, not a recall problem.
+var ErrCmuxLocked = errors.New(
+	"cmux refuses commands from outside cmux (socketControlMode is cmuxOnly). " +
+		"Fix it in cmux Settings by allowing external control, or set a socket " +
+		"password there and export CMUX_SOCKET_PASSWORD before running recall")
+
+// cmuxAccessDenied reports whether msg is cmux turning away an outside
+// process rather than a real failure.
+func cmuxAccessDenied(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "access denied") ||
+		strings.Contains(m, "only processes started inside cmux")
+}
+
 func cmuxPing(ctx context.Context, cli string) error {
 	out, err := cmuxExec(ctx, cli, "ping")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		if cmuxAccessDenied(msg) {
+			return ErrCmuxLocked
+		}
 		if msg != "" {
 			return fmt.Errorf("cmux ping: %s", msg)
 		}
@@ -125,8 +144,12 @@ func CmuxEnsureRunning(ctx context.Context) error {
 	if !ok {
 		return errors.New("cmux CLI not found on PATH or in " + CmuxBundleCLI)
 	}
-	if cmuxPing(ctx, cli) == nil {
+	if err := cmuxPing(ctx, cli); err == nil {
 		return nil
+	} else if errors.Is(err, ErrCmuxLocked) {
+		// The app is running and answering; it just will not take orders
+		// from us. Starting it again would not change that.
+		return err
 	}
 	if out, err := cmuxExec(ctx, "open", "-a", "cmux"); err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -179,6 +202,9 @@ func runCmux(a *Action) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
+		if cmuxAccessDenied(msg) {
+			return ErrCmuxLocked
+		}
 		if msg != "" {
 			return fmt.Errorf("cmux: %s", msg)
 		}

@@ -387,9 +387,10 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, res)
 		return
 	}
-	if act.Kind != launch.KindFocus && act.Script == "" {
-		// Without a script launch.Run would exec claude in place of this
-		// server. Report the command instead so the user can paste it.
+	if act.Kind != launch.KindFocus && act.Script == "" && act.Terminal != launch.TerminalCmux {
+		// Without a script or a multiplexer launch.Run would exec claude in
+		// place of this server. Report the command instead so the user can
+		// paste it. cmux runs as a child process, so it is safe here.
 		s.mu.Lock()
 		s.app.ReleaseLock(sess.ID)
 		s.mu.Unlock()
