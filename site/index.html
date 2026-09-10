@@ -149,6 +149,8 @@
     .more h3 { margin: 0 0 12px; font-size: 16px; color: var(--ink-2); font-weight: 500; }
     .more pre { margin: 0; overflow-x: auto; font-size: 14.5px; line-height: 1.6; }
     .more .c { color: var(--ink-3); }
+    .always .box h3 { margin: 0 0 8px; font-size: 19px; color: var(--ink); font-weight: 600; }
+    .always .box p { margin: 0; color: var(--ink-2); font-size: 16px; }
 
     .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
     .fact { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
@@ -463,6 +465,34 @@ RECALL_DRY_RUN=1 recall open 0f1e2d3c</pre>
         <div>
           <strong>Local only</strong>
           Bound to 127.0.0.1, every request carries the token from the URL, cross-origin requests are refused and no script loads from outside. Nothing leaves your machine.
+        </div>
+      </div>
+    </section>
+
+    <section id="always">
+      <h2>Always on</h2>
+      <p class="sub"><code>recall serve</code> stops when you close the terminal. <code>recall service install</code> turns it into a login job instead, and adds a daily archive run behind it. Two launchd agents, each step asking y/N. macOS only.</p>
+
+      <div class="then">
+        <div class="box">
+          <p class="k">install once</p>
+<pre><span class="t-amber">recall service install</span>   <span class="t-dim"># dashboard + daily archive</span></pre>
+        </div>
+        <div class="box">
+          <p class="k">then bookmark this</p>
+<pre><span class="t-amber">recall service url</span>
+<span class="t-dim">http://127.0.0.1:4747/?t=4fa2e085621d33cf…</span></pre>
+        </div>
+      </div>
+
+      <div class="more always">
+        <div class="box">
+          <h3>One address that never moves</h3>
+          <p>The first agent runs <code>recall serve --no-open</code> at login and starts it again after a crash. The token lives in <code>~/.recall</code> and does not change, so neither does the URL. Bookmark it, or link it from whatever other dashboard you already keep open. <code>recall service url</code> prints it on one line and nothing else.</p>
+        </div>
+        <div class="box">
+          <h3>Archived once a day, at 09:00</h3>
+          <p>The second agent runs <code>recall archive --all --quiet</code> every morning. The SessionEnd hook only catches a session that ends cleanly, and a session you left open for three weeks never ends. This one walks every transcript and archives what is missing, so retention can be reset and your history still survives. Change the time with <code>--at 02:30</code>, check it with <code>recall service status</code>, remove it with <code>recall service uninstall</code>.</p>
         </div>
       </div>
     </section>
