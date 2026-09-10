@@ -498,6 +498,20 @@ func TestOpenRecordsLaunchAndLocks(t *testing.T) {
 		t.Error("ReleaseLock did not release")
 	}
 
+	// Dry run: plans and logs the event but never locks or records a launch.
+	saved = nil
+	events = nil
+	lockCalls = 0
+	if _, err := a.Open(sess, launch.Options{DryRun: true}); err != nil {
+		t.Fatalf("dry-run Open: %v", err)
+	}
+	if lockCalls != 0 || a.HoldsLock(sidA) || saved != nil {
+		t.Errorf("dry run took lock or recorded launch: calls=%d holds=%v saved=%v", lockCalls, a.HoldsLock(sidA), saved)
+	}
+	if len(events) != 1 || events[0]["dry_run"] != true {
+		t.Errorf("dry-run events = %v", events)
+	}
+
 	// Forks never lock the parent session.
 	lockCalls = 0
 	if act, err := a.Open(sess, launch.Options{Fork: true}); err != nil || act.Argv[len(act.Argv)-1] != "--fork-session" {
@@ -558,7 +572,7 @@ func TestOpenRealLockSecondOpenFails(t *testing.T) {
 	a.d.lock = live.Lock
 	sess := baseSessions()[0]
 	a.Sessions = []*model.Session{sess}
-	if _, err := a.Open(sess, launch.Options{DryRun: true}); err != nil {
+	if _, err := a.Open(sess, launch.Options{}); err != nil {
 		if strings.Contains(err.Error(), "not implemented") {
 			t.Skip("live.Lock not implemented yet")
 		}
@@ -572,11 +586,11 @@ func TestOpenRealLockSecondOpenFails(t *testing.T) {
 	}
 	b, _ := New(a.Paths)
 	b.d = a.d
-	if _, err := b.Open(sess, launch.Options{DryRun: true}); err == nil || !strings.Contains(err.Error(), "already open") {
+	if _, err := b.Open(sess, launch.Options{}); err == nil || !strings.Contains(err.Error(), "already open") {
 		t.Fatalf("second Open = %v, want already open", err)
 	}
 	a.ReleaseLock(sidA)
-	if _, err := b.Open(sess, launch.Options{DryRun: true}); err != nil {
+	if _, err := b.Open(sess, launch.Options{}); err != nil {
 		t.Fatalf("Open after release: %v", err)
 	}
 }

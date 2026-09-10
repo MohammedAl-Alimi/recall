@@ -178,6 +178,7 @@ func Run(p model.Paths) ([]Check, error) {
 	checks = append(checks, checkRecallDir(p))
 	checks = append(checks, checkHooks(p))
 	checks = append(checks, checkWidget())
+	checks = append(checks, checkParser())
 	checks = append(checks, Check{Name: "network", Status: "ok", Detail: "recall makes no network connections"})
 	return checks, nil
 }

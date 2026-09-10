@@ -293,7 +293,7 @@ func TestSummary(t *testing.T) {
 			t.Errorf("Summary = %q, want %q", got, tc.want)
 		}
 	}
-	if strings.Contains(Summary(fixtures()), "—") {
+	if strings.Contains(Summary(fixtures()), "\u2014") {
 		t.Error("summary must not contain an em dash")
 	}
 }

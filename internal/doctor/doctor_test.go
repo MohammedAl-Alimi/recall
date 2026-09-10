@@ -299,3 +299,13 @@ func TestHooksPartial(t *testing.T) {
 		t.Fatalf("hooks: %+v", c)
 	}
 }
+
+func TestParserSelfTest(t *testing.T) {
+	c := checkParser()
+	if c.Status != "ok" {
+		t.Fatalf("parser self-test: %+v", c)
+	}
+	if !strings.Contains(c.Detail, "parsed") {
+		t.Errorf("detail = %q", c.Detail)
+	}
+}

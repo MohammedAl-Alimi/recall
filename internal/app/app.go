@@ -514,13 +514,13 @@ func (a *App) Open(sess *model.Session, opts launch.Options) (*launch.Action, er
 		return nil, errors.New("launch plan returned nothing")
 	}
 
-	if action.Kind == "resume" && !opts.Fork {
+	if action.Kind == "resume" && !opts.Fork && !opts.DryRun {
 		if err := a.acquire(sess); err != nil {
 			return nil, err
 		}
 	}
 
-	if len(action.Argv) > 0 && (action.Kind == "resume" || action.Kind == "new" || action.Kind == "attach") {
+	if !opts.DryRun && len(action.Argv) > 0 && (action.Kind == "resume" || action.Kind == "new" || action.Kind == "attach") {
 		muxName := ""
 		if opts.Keep {
 			muxName = "tmux"

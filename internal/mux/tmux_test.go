@@ -68,21 +68,21 @@ func TestDefaultConf(t *testing.T) {
 
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"":                "''",
-		"claude":          "claude",
-		"/Users/me/proj":  "/Users/me/proj",
-		"--session-id":    "--session-id",
-		"my name":         "'my name'",
-		"it's":            `'it'\''s'`,
-		"a$b":             "'a$b'",
-		"Work @acme.io /x":  "'Work @acme.io /x'",
-		"semi;colon":      "'semi;colon'",
-		"back`tick":       "'back`tick'",
-		"dollar$(uname)":  "'dollar$(uname)'",
-		"quote\"double":   `'quote"double'`,
-		"new\nline":       "'new\nline'",
-		"tab\there":       "'tab\there'",
-		"path/with-dash_": "path/with-dash_",
+		"":                 "''",
+		"claude":           "claude",
+		"/Users/me/proj":   "/Users/me/proj",
+		"--session-id":     "--session-id",
+		"my name":          "'my name'",
+		"it's":             `'it'\''s'`,
+		"a$b":              "'a$b'",
+		"Work @acme.io /x": "'Work @acme.io /x'",
+		"semi;colon":       "'semi;colon'",
+		"back`tick":        "'back`tick'",
+		"dollar$(uname)":   "'dollar$(uname)'",
+		"quote\"double":    `'quote"double'`,
+		"new\nline":        "'new\nline'",
+		"tab\there":        "'tab\there'",
+		"path/with-dash_":  "path/with-dash_",
 	}
 	for in, want := range cases {
 		if got := ShellQuote(in); got != want {

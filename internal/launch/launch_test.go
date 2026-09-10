@@ -14,20 +14,20 @@ const sid = "0f1e2d3c-4b5a-6978-8a9b-c0d1e2f3a4b5"
 
 func TestShellQuote(t *testing.T) {
 	cases := map[string]string{
-		"":            "''",
-		"abc":         "abc",
-		"/a/b-c.d":    "/a/b-c.d",
-		"a b":         "'a b'",
-		"it's":        `'it'\''s'`,
-		"$HOME":       "'$HOME'",
-		"--resume=x":  "--resume=x",
+		"":              "''",
+		"abc":           "abc",
+		"/a/b-c.d":      "/a/b-c.d",
+		"a b":           "'a b'",
+		"it's":          `'it'\''s'`,
+		"$HOME":         "'$HOME'",
+		"--resume=x":    "--resume=x",
 		"Work @acme.io": "'Work @acme.io'",
-		"a\"b":        `'a"b'`,
-		"a\nb":        "'a\nb'",
-		"back\\slash": `'back\slash'`,
-		"tab\there":   "'tab\there'",
-		"ü":           "'ü'",
-		"*":           "'*'",
+		"a\"b":          `'a"b'`,
+		"a\nb":          "'a\nb'",
+		"back\\slash":   `'back\slash'`,
+		"tab\there":     "'tab\there'",
+		"ü":             "'ü'",
+		"*":             "'*'",
 	}
 	for in, want := range cases {
 		if got := ShellQuote(in); got != want {
