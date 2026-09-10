@@ -212,6 +212,43 @@ func HasArchive(p model.Paths, sid string) (string, bool) {
 	return path, true
 }
 
+// IsCurrent reports whether sess already has a complete archive that matches
+// the transcript on disk, so a re-archive would do nothing but rewrite the
+// same bytes. The daily 'recall archive --all' run uses it to stay cheap:
+// only sessions that grew, moved or were never archived are touched.
+//
+// "Complete" means: the archived transcript exists, a manifest exists, the
+// manifest names this transcript as its source, and the archived file is the
+// same size as the source. A hard-linked archive satisfies the size check by
+// construction; a copied one stops matching as soon as Claude appends a line.
+func IsCurrent(p model.Paths, sess *model.Session, withSidecars bool) bool {
+	if sess == nil || sess.ID == "" || sess.Path == "" {
+		return false
+	}
+	src, err := os.Stat(sess.Path)
+	if err != nil || !src.Mode().IsRegular() {
+		return false
+	}
+	dst, ok := HasArchive(p, sess.ID)
+	if !ok {
+		return false
+	}
+	st, err := os.Stat(dst)
+	if err != nil || st.Size() != src.Size() {
+		return false
+	}
+	m, err := ReadManifest(p, sess.ID)
+	if err != nil || m == nil || m.Source != sess.Path {
+		return false
+	}
+	// A run that asked for sidecars is only current once they are in the
+	// manifest too, so adding --sidecars later still copies them.
+	if withSidecars && len(m.Files) < 2 && len(SidecarDirs(p, sess)) > 0 {
+		return false
+	}
+	return true
+}
+
 // Restore returns a transcript path that can be resumed from. When the
 // session's own transcript still exists it is returned as is. Otherwise the
 // archived copy is put back under ProjectsDir, but only after checking that

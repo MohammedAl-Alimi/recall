@@ -38,13 +38,19 @@ func newArchiveCmd() *cobra.Command {
 	var (
 		all      bool
 		sidecars bool
+		quiet    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "archive <sid>|--all",
 		Short: "Archive a transcript under the recall directory",
 		Long: `archive hard-links (or copies) a transcript into ~/.recall/archive/<sid>/ so
 it outlives Claude's cleanupPeriodDays deletion. With --sidecars the
-tool-results and file-history directories are copied too.`,
+tool-results and file-history directories are copied too.
+
+A session whose archive already matches the transcript on disk is skipped,
+so 'archive --all' is cheap to repeat. With --quiet only a one line summary
+is printed, and nothing at all when nothing changed; that is the form the
+daily 'recall service' job runs.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !all && len(args) != 1 {
 				return usagef("archive: pass a session id or --all")
@@ -75,15 +81,32 @@ tool-results and file-history directories are copied too.`,
 				targets = []*model.Session{s}
 			}
 			out := cmd.OutOrStdout()
-			failed := 0
+			if quiet {
+				out = io.Discard
+			}
+			failed, skipped, done := 0, 0, 0
 			for _, s := range targets {
+				// A session that is already archived byte for byte is left
+				// alone, so the daily run costs a stat per session.
+				if all && archive.IsCurrent(a.Paths, s, sidecars) {
+					skipped++
+					fmt.Fprintf(out, "%s  %s  (already archived)\n", s.Short(), archive.Dir(a.Paths, s.ID))
+					continue
+				}
 				dir, err := archive.Archive(a.Paths, s, sidecars)
 				if err != nil {
+					// Failures always reach stderr, quiet or not: a daily
+					// job that silently stops archiving is the one thing
+					// this feature exists to prevent.
 					failed++
 					fmt.Fprintf(cmd.ErrOrStderr(), "recall: archive %s: %v\n", s.Short(), err)
 					continue
 				}
+				done++
 				fmt.Fprintf(out, "%s  %s\n", s.Short(), dir)
+			}
+			if quiet && (done > 0 || failed > 0) {
+				fmt.Fprintf(cmd.OutOrStdout(), "archived %d new, %d already archived, %d failed\n", done, skipped, failed)
 			}
 			if failed > 0 {
 				return fmt.Errorf("archive: %d of %d failed", failed, len(targets))
@@ -93,6 +116,7 @@ tool-results and file-history directories are copied too.`,
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "archive every session with a transcript")
 	cmd.Flags().BoolVar(&sidecars, "sidecars", false, "also copy tool-results and file-history directories")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "print one summary line instead of one line per session, and nothing when nothing changed")
 	return cmd
 }
 
