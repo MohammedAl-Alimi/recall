@@ -61,7 +61,7 @@ func TestDefaultConf(t *testing.T) {
 			t.Errorf("DefaultConf missing %q", want)
 		}
 	}
-	if strings.Contains(c, "—") {
+	if strings.ContainsRune(c, 0x2014) {
 		t.Error("DefaultConf contains an em dash")
 	}
 }
