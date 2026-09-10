@@ -73,36 +73,12 @@ func SetRetention(p model.Paths, days int) error {
 }
 
 func setRetentionOnce(p model.Paths, days int) error {
-	mode := os.FileMode(0o600)
-	var orig []byte
-	data, err := os.ReadFile(p.SettingsFile)
-	switch {
-	case err == nil:
-		orig = data
-		if st, err := os.Stat(p.SettingsFile); err == nil {
-			mode = st.Mode().Perm()
-		}
-	case os.IsNotExist(err):
-		orig = nil
-	default:
-		return err
-	}
-	obj, err := parseSettings(orig)
+	obj, err := ReadSettings(p)
 	if err != nil {
 		return err
 	}
 	obj[RetentionKey] = json.Number(strconv.Itoa(days))
-	out, err := json.MarshalIndent(obj, "", "  ")
-	if err != nil {
-		return err
-	}
-	out = append(out, '\n')
-	if orig != nil {
-		if err := os.WriteFile(p.SettingsFile+".bak", orig, mode); err != nil {
-			return fmt.Errorf("archive: write backup: %w", err)
-		}
-	}
-	return writeAtomic(p.SettingsFile, out, mode)
+	return WriteSettings(p, obj)
 }
 
 // parseSettings decodes settings.json into a generic map, keeping numbers as
