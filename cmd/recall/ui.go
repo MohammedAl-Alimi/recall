@@ -53,6 +53,10 @@ func runUI(cmd *cobra.Command, fromWidget bool, query string) error {
 			if _, err := runChildHolding(a, act, cmd.InOrStdin(), out, cmd.ErrOrStderr()); err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "recall:", err)
 			}
+			// claude has exited: drop the session lock this process still
+			// holds, or the next pick of the same session is refused as
+			// already open.
+			a.ReleaseLocks()
 			opts.InitialQuery = ""
 			continue
 		}
