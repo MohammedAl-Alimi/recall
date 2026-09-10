@@ -30,6 +30,7 @@ type Options struct {
 	Cwd string
 	// Terminal selects where a new tab or window is opened: "" (auto from
 	// TermProgram), "terminal" (Terminal.app), "iterm" (iTerm2) or "cmux".
+	// A non-empty value implies NewTab; InPlace still wins.
 	Terminal string
 }
 
@@ -46,6 +47,10 @@ type Action struct {
 	Script      string
 	Description string
 	Note        string
+	// Terminal is TerminalCmux when Argv is a cmux CLI call that opens a
+	// workspace; Run then starts the app if needed and runs Argv as a child
+	// instead of exec'ing it in place. Empty for every other action.
+	Terminal string
 }
 
 // Action kinds.
@@ -92,6 +97,9 @@ func Plan(sess *model.Session, opts Options) (*Action, error) {
 	if sess.ID == "" {
 		return nil, errors.New("session has no id")
 	}
+	if err := checkTerminal(opts.Terminal); err != nil {
+		return nil, err
+	}
 
 	if sess.Live != nil && sess.Live.Alive && !opts.Fork {
 		return planLive(sess, opts)
@@ -101,6 +109,9 @@ func Plan(sess *model.Session, opts Options) (*Action, error) {
 
 // PlanNew plans a brand new session in opts.Cwd (default: current dir).
 func PlanNew(opts Options) (*Action, error) {
+	if err := checkTerminal(opts.Terminal); err != nil {
+		return nil, err
+	}
 	cwd := opts.Cwd
 	if cwd == "" {
 		wd, err := os.Getwd()
@@ -130,7 +141,7 @@ func PlanNew(opts Options) (*Action, error) {
 		a.Kind = KindAttach
 	}
 	a.Description = "new session in " + cwd
-	decorateSpawn(a, opts)
+	decorateSpawn(a, opts, cmuxTitle("", opts.Name, "", cwd))
 	return a, nil
 }
 
@@ -150,8 +161,8 @@ func planLive(sess *model.Session, opts Options) (*Action, error) {
 		if lv.Mux.Attached {
 			a.Note = "already attached elsewhere; this attaches a second client"
 		}
-		if opts.NewTab {
-			decorateSpawn(a, opts)
+		if opts.NewTab || opts.Terminal != "" {
+			decorateSpawn(a, opts, cmuxTitle(sess.ID, sess.Label, sess.Title, ""))
 		}
 		return a, nil
 	}
@@ -219,26 +230,61 @@ func planResume(sess *model.Session, opts Options) (*Action, error) {
 		a.Kind = KindAttach
 		a.Description += " (kept in tmux)"
 	}
-	decorateSpawn(a, opts)
+	decorateSpawn(a, opts, cmuxTitle(sess.ID, sess.Label, sess.Title, cwd))
 	return a, nil
 }
 
-// decorateSpawn attaches the osascript for a new terminal tab when one was
-// asked for. The default is an in-place exec in the caller's terminal, so
-// Enter in the list and 'recall open' resume right here; opts.NewTab (the o
-// key, --new-tab) opens a Terminal.app or iTerm2 tab instead. opts.InPlace
-// is accepted for explicitness and wins over NewTab.
-func decorateSpawn(a *Action, opts Options) {
-	if !opts.NewTab || opts.InPlace {
+// decorateSpawn attaches the osascript or cmux call for a new terminal
+// tab when one was asked for. The default is an in-place exec in the
+// caller's terminal, so Enter in the list and 'recall open' resume right
+// here; opts.NewTab (the o key, --new-tab) or an explicit opts.Terminal
+// opens a Terminal.app tab, an iTerm2 tab or a cmux workspace instead.
+// opts.InPlace is accepted for explicitness and wins over both.
+//
+// Terminal choice: opts.Terminal when set; otherwise cmux when recall runs
+// inside cmux and its CLI is found, iTerm2 when TermProgram says so, and
+// Terminal.app for everything else. title names the cmux workspace.
+func decorateSpawn(a *Action, opts Options, title string) {
+	if opts.InPlace || (!opts.NewTab && opts.Terminal == "") {
 		return
 	}
 	term := opts.TermProgram
 	if term == "" {
 		term = os.Getenv("TERM_PROGRAM")
 	}
+	choice := strings.ToLower(opts.Terminal)
+	if choice == "" {
+		switch {
+		case insideCmux(opts):
+			choice = TerminalCmux
+		case strings.HasPrefix(term, "iTerm"):
+			choice = TerminalITerm
+		default:
+			choice = TerminalApp
+		}
+	}
+	if choice == TerminalCmux {
+		cli, ok := CmuxAvailable()
+		if ok {
+			decorateCmux(a, cli, title)
+			return
+		}
+		if opts.Terminal != "" {
+			// Asked for explicitly: keep the cmux shape so the dry run
+			// and the error name the missing CLI instead of opening a
+			// Terminal.app tab nobody asked for.
+			decorateCmux(a, "cmux", title)
+			return
+		}
+		// Auto-detected but no CLI: fall back to the AppleScript path.
+		choice = TerminalApp
+		if strings.HasPrefix(term, "iTerm") {
+			choice = TerminalITerm
+		}
+	}
 	cmd := strings.Join(quoteAll(a.Argv), " ")
-	switch {
-	case strings.HasPrefix(term, "iTerm"):
+	switch choice {
+	case TerminalITerm:
 		a.Script = NewITermTabScript(a.Cwd, cmd)
 		a.Description += " (new iTerm2 tab)"
 	default:
@@ -296,6 +342,9 @@ func Run(a *Action) error {
 		return runOsascript(a.Script)
 	case KindAttach, KindResume, KindNew:
 		PrintNote(Stderr, a)
+		if a.Terminal == TerminalCmux {
+			return runCmux(a)
+		}
 		if a.Script != "" {
 			return runOsascript(a.Script)
 		}
@@ -785,6 +834,8 @@ func normalizeHost(app string) string {
 		return "Terminal"
 	case "iterm", "iterm2":
 		return "iTerm2"
+	case "cmux":
+		return "cmux"
 	case "cursor":
 		return "Cursor"
 	case "code", "vscode", "visual studio code", "code - insiders", "code-insiders":
