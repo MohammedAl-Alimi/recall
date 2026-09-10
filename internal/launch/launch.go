@@ -28,6 +28,9 @@ type Options struct {
 	// Cwd is used by PlanNew (and by Plan when sess is nil) as the directory
 	// for a fresh session. Empty means the current working directory.
 	Cwd string
+	// Terminal selects where a new tab or window is opened: "" (auto from
+	// TermProgram), "terminal" (Terminal.app), "iterm" (iTerm2) or "cmux".
+	Terminal string
 }
 
 // Action is a planned, not yet executed, open operation.
