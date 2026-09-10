@@ -158,6 +158,7 @@ running them.`,
 		newSetupCmd(),
 		newUninstallCmd(),
 		newShellCmd(),
+		newServeCmd(),
 		newIndexCmd(),
 		newVersionCmd(),
 	)
