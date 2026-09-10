@@ -64,9 +64,13 @@ runs `recall --from-widget`, which loops back into the list when claude exits.
 
 Scanning is incremental: `cache.json` stores parsed sessions keyed by path,
 inode, size and mtime. A grown transcript is re-read from its last offset; an
-untouched one is not opened at all. The head is streamed with an 8 MB cap and
-the tail is read backwards with a 4 MB cap, so a 300 MB transcript costs the
-same as a small one.
+untouched one is not opened at all. A transcript up to 12 MB is streamed in
+full. A larger one is parsed from its head (streamed until the id, first cwd
+and first prompt are known, at most 8 MB) plus its last 4 MB; the middle is
+only line-counted, so `Lines` stays exact while turns, compactions, files
+changed and the cwd counts behind `WorkCwd` cover the head and the tail
+only. That is the price of a 300 MB transcript costing about the same as a
+small one.
 
 ## States
 
@@ -82,7 +86,7 @@ session. The plain word is always painted next to the dot.
 | `foreign` | Running | live process recall did not start and cannot focus (Cursor, VS Code) |
 | `bg_stale` | Gone | bg session whose daemon is dead |
 | `closed` | Closed | transcript on disk, no process |
-| `interrupted` | Closed | closed with a dangling tool_use at the end |
+| `interrupted` | Closed | closed after an Esc interruption: a trailing `[Request interrupted by user` record. A tool_use with no tool_result at the end does not change the state; it is kept as `DanglingTool` and shown in the preview and in the loss note before a resume |
 | `headless` | Closed | `-p` or SDK session, hidden by default |
 | `archived` | Closed | transcript gone from projects, copy in `~/.recall/archive` |
 | `stale` | Expiring | transcript still on disk, last active within 2 days of `cleanupPeriodDays`, not archived; the row hints `a archives before deletion` |

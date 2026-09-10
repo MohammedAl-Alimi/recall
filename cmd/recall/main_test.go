@@ -260,7 +260,7 @@ func TestLsRowStableFields(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"id", "title", "titleSource", "label", "state", "stateWord", "project", "workCwd", "cwd", "branch", "lastActive", "createdAt", "turns", "contextTokens", "prs", "live", "interrupted", "headless", "ghost", "archived"}
+	want := []string{"id", "title", "titleSource", "label", "state", "stateWord", "project", "workCwd", "cwd", "branch", "lastActive", "createdAt", "turns", "contextTokens", "prs", "live", "interrupted", "headless", "ghost", "archived", "parseErrors"}
 	for _, row := range rows {
 		for _, k := range want {
 			if _, ok := row[k]; !ok {

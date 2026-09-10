@@ -11,7 +11,10 @@ which contracts hold on the current machine.
 
 **Contract.** Each session is one JSONL file at
 `~/.claude/projects/<encoded cwd>/<uuid>.jsonl` where the encoded cwd
-replaces every byte outside `[A-Za-z0-9]` with `-`. Conversational records
+replaces every UTF-16 code unit outside `[A-Za-z0-9]` with `-` (Claude Code
+runs `replace(/[^a-zA-Z0-9]/g, "-")` on a JavaScript string, so `ü` becomes
+one dash and an emoji, being a surrogate pair, becomes two). recall mirrors
+that in `scan.EncodeProjectDir`. Conversational records
 have `type` (`user`, `assistant`, `attachment`, `system`), `uuid`,
 `parentUuid`, `timestamp`, `cwd`, `sessionId`, `version`, `gitBranch` and
 optional `entrypoint`, `promptId`, `isMeta`, `isCompactSummary`,
@@ -26,8 +29,10 @@ subtype `compact_boundary` mark a compaction. Files named
 tokens, cost, PR links, interrupted and headless heuristics.
 
 **Detection.** Unknown record types are counted, never fatal; the count is
-visible in `ls --json` as `parse_errors`. A transcript with no recognisable
-records still yields a session with its id, path and mtime.
+visible in `ls --json` as `parseErrors` (`recall ls --json | jq
+'.[].parseErrors'`), so a format change shows up as a count that rises across
+sessions. A transcript with no recognisable records still yields a session
+with its id, path and mtime.
 
 **Fallback.** Title falls back from custom-title to agent-name to ai-title
 to the first prompt to the file name. Missing envelopes degrade one field at

@@ -9,21 +9,27 @@ in the way that loses the least: focus the tab it is still in, attach the tmux
 session that kept it alive, or `claude --resume` it right here in your
 terminal (`o` opens it in a new tab instead).
 
-```
-recall   53 sessions · 13 live · 1 waiting                 [all]  Tab scope  / search  ? help
+```text
+ recall  5 sessions · 2 live · 1 waiting                              scope: all · ghosts
 
-● Needs you  Login page for the dashboard           ascension   main          2m
-             waiting for permission: Edit src/app/login.tsx                PR #42
-● Running    Scanner incremental cache              recall      feat/scan    now
-             Running go test ./internal/scan ...                              wt
-○ Closed     Fix flaky calendar popover test        lcc         main          3h
-             Fixed the race by cancelling the previous timer.
-○ Closed     ETF savings plan rebalance             sparplan    main          2d
-             Here is the drift table for September.                         fork
-◌ Gone       Kitchen forecast kickoff notes         biergarten                12d
-             transcript deleted by retention, prompts kept from history
+> ● Needs you  Login page for the dashboard                ascension   main             2m
+              Waiting for permission: Edit src/app/login.tsx                         PR#42
 
-Enter open   n new here   K keep   f fork   r label   p pin   a archive   q quit
+  ● Running    Scanner incremental cache                   recall      feat/scan       now
+              Running go test ./internal/scan ...                                       wt
+
+  · Closed     Fix flaky calendar popover test             lcc         main             3h
+              Fixed the race by cancelling the previous timer.
+
+  · Closed     ETF savings plan rebalance                  sparplan    main             2d
+              Here is the drift table for September.                                  fork
+
+  ○ Gone       Kitchen forecast kickoff notes              biergarten                  12d
+              summarise the kickoff notes for the kitchen forecast
+
+
+ 0f1e2d3c  /Users/me/dev/ascension
+ Enter open · Space preview · / search · n new · f fork · ? keys
 ```
 
 ## Why
@@ -36,8 +42,10 @@ laptops get rebooted, and the session where the fix was half done is gone.
 recall fixes three things:
 
 1. **Nothing gets deleted behind your back.** `recall setup` raises Claude's
-   `cleanupPeriodDays` (ten years by default, or any number you choose) and archives transcripts under
-   `~/.recall` so a session can be resumed months later.
+   `cleanupPeriodDays` (ten years by default, or any number you choose) and
+   installs a hook that archives each session under `~/.recall` when it
+   ends, so a session can be resumed months later. Run `recall archive --all`
+   once for the sessions you already have.
 2. **One list, every project.** Title, project, branch, last prompt, last
    answer, open PRs, whether it is live, waiting for you, or long gone.
 3. **The reopen tier that loses the least.** Still running in a Terminal.app
@@ -131,25 +139,40 @@ prints what would run instead of running it.
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Open: focus, attach or resume, whichever loses the least |
-| `o` / `O` | Open in a new tab / new window |
-| `n` / `N` | New session here / in a chosen directory |
-| `f` | Fork the selected session |
-| `K` | Keep: run inside tmux so it survives the tab |
-| `Space` | Preview pane (or mark, in select mode `V`) |
-| `/` | Search (supports `state:kept`, `branch:main`, `since:7d`, `project:api`) |
-| `Tab` | Cycle scope: all, project, live, kept, pinned, ghosts |
-| `r` | Label the session (shown instead of the title, usable in `recall open`) |
-| `p` / `H` / `h` | Pin / hide / show hidden |
-| `t` | Tag |
-| `a` | Archive now |
-| `y` / `c` | Copy the resume command / the claude.ai link |
-| `x` / `D` | Stop / delete (press twice) |
-| `u` | Undo the last change |
-| `g` | Toggle ghosts |
-| `S` / `R` | Setup / refresh |
-| `?` / `:` | Help / command palette |
-| `q`, `Esc` | Quit |
+| `Enter` | open here (focus, attach or resume) |
+| `Space` | preview (mark in select mode) |
+| `/` | search |
+| `Tab` | cycle scope |
+| `?` | help |
+| `:` | command palette |
+| `n` | new session here |
+| `N` | new session in row's dir |
+| `f` | fork session |
+| `K` | open and keep (tmux) |
+| `o` | open in new tab |
+| `r` | rename label |
+| `p` | pin / unpin |
+| `H` | hide / unhide |
+| `h` | show hidden |
+| `t` | tag |
+| `a` | archive now |
+| `y` | copy resume command |
+| `c` | copy claude.ai link |
+| `x` | stop (press twice) |
+| `D` | remove from list (press twice) |
+| `S` | setup |
+| `R` | refresh |
+| `g` | toggle ghosts |
+| `V` | multi-select mode |
+| `u` | undo last hide/remove |
+| `q / Esc` | quit |
+
+`j` / `k` and the arrow keys move, `PgUp` / `PgDn` page, `Home` / `End` jump.
+`Tab` cycles the scopes all, project, live, kept, pinned and ghosts. Search
+understands `state:kept`, `branch:main`, `since:7d` and `project:api`. A
+label set with `r` is shown instead of the title and works as a reference in
+`recall open`. This table is generated from the UI's action table and checked
+by `TestReadmeKeyTableMatchesActionTable`, as is the mockup above.
 
 Every state is painted as a plain word next to its dot, so the list reads
 without color. `NO_COLOR` is respected.
@@ -175,7 +198,7 @@ States, in the order they sort:
 
 | Dot | Word | Meaning |
 | --- | --- | --- |
-| `●` amber | Needs you | Live and waiting for a permission or an answer |
+| `●` red | Needs you | Live and waiting for a permission or an answer |
 | `●` green | Running | Live: idle, busy, kept in tmux, or a background job |
 | `·` | Closed | Transcript on disk, no process; resume with Enter |
 | `◔` amber | Expiring | Transcript still on disk and resumable, but within 2 days of `cleanupPeriodDays`; press `a` to archive before Claude deletes it |

@@ -28,6 +28,7 @@
       --term-dim: #9a8f82;
       --term-amber: #f0a04b;
       --term-green: #7cc48a;
+      --term-red: #f07a6a;
       --radius: 12px;
       --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
       --mono: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
@@ -103,6 +104,7 @@
     .term .bar i:first-child { background: var(--term-amber); }
     .t-dim { color: var(--term-dim); }
     .t-amber { color: var(--term-amber); font-weight: 600; }
+    .t-red { color: var(--term-red); font-weight: 600; }
     .t-green { color: var(--term-green); font-weight: 600; }
     .t-sel { background: rgba(240,160,75,0.14); display: inline-block; width: 100%; }
 
@@ -178,20 +180,26 @@
 
       <div class="term" role="img" aria-label="Rendered example of the recall list">
         <div class="bar" aria-hidden="true"><i></i><i></i><i></i></div>
-<pre><span class="t-amber">recall</span>   53 sessions · 13 live · 1 waiting                 <span class="t-dim">[all]  Tab scope  / search  ? help</span>
+<pre class="mockup"> <span class="t-amber">recall</span>  5 sessions · 2 live · 1 waiting                              <span class="t-dim">scope: all · ghosts</span>
 
-<span class="t-sel"><span class="t-amber">●</span> <span class="t-amber">Needs you</span>  Login page for the dashboard           ascension   main          2m
-             <span class="t-dim">waiting for permission: Edit src/app/login.tsx                PR #42</span></span>
-<span class="t-green">●</span> <span class="t-green">Running</span>    Scanner incremental cache              recall      feat/scan    now
-             <span class="t-dim">Running go test ./internal/scan ...                              wt</span>
-○ Closed     Fix flaky calendar popover test        lcc         main          3h
-             <span class="t-dim">Fixed the race by cancelling the previous timer.</span>
-○ Closed     ETF savings plan rebalance             sparplan    main          2d
-             <span class="t-dim">Here is the drift table for September.                         fork</span>
-◌ Gone       Kitchen forecast kickoff notes         biergarten                12d
-             <span class="t-dim">transcript deleted by retention, prompts kept from history</span>
+<span class="t-sel">&gt; <span class="t-red">● Needs you</span>  Login page for the dashboard                ascension   main             2m</span>
+<span class="t-dim">              Waiting for permission: Edit src/app/login.tsx                         PR#42</span>
 
-<span class="t-dim">Enter open   n new here   K keep   f fork   r label   p pin   a archive   q quit</span></pre>
+  <span class="t-green">● Running</span>    Scanner incremental cache                   recall      feat/scan       now
+<span class="t-dim">              Running go test ./internal/scan ...                                       wt</span>
+
+  · Closed     Fix flaky calendar popover test             lcc         main             3h
+<span class="t-dim">              Fixed the race by cancelling the previous timer.</span>
+
+  · Closed     ETF savings plan rebalance                  sparplan    main             2d
+<span class="t-dim">              Here is the drift table for September.                                  fork</span>
+
+  <span class="t-dim">○ Gone</span>       Kitchen forecast kickoff notes              biergarten                  12d
+<span class="t-dim">              summarise the kickoff notes for the kitchen forecast</span>
+
+
+<span class="t-dim"> 0f1e2d3c  /Users/me/dev/ascension</span>
+<span class="t-dim"> Enter open · Space preview · / search · n new · f fork · ? keys</span></pre>
       </div>
     </section>
 
@@ -202,7 +210,7 @@
         <div class="fact">
           <div class="num">01 · retention</div>
           <h3>Nothing deleted behind your back</h3>
-          <p>Claude removes transcripts after <code>cleanupPeriodDays</code>, 30 by default. <code>recall setup</code> raises it to a number you choose and archives every transcript under <code>~/.recall</code>, so a session from last spring still resumes.</p>
+          <p>Claude removes transcripts after <code>cleanupPeriodDays</code>, 30 by default. <code>recall setup</code> raises it to a number you choose and installs a hook that archives each session under <code>~/.recall</code> when it ends, so a session from last spring still resumes. <code>recall archive --all</code> covers the sessions you already have.</p>
         </div>
         <div class="fact">
           <div class="num">02 · focus, attach, resume</div>
@@ -279,22 +287,33 @@ RECALL_DRY_RUN=1 recall open 0f1e2d3c</pre>
       <h2>Keys</h2>
       <p class="sub">Every state is painted as a plain word next to its dot, so the list reads without color. <code>NO_COLOR</code> is respected.</p>
       <div class="keys">
-        <div><kbd>Enter</kbd> open: focus, attach or resume</div>
-        <div><kbd>o</kbd> open in a new tab</div>
-        <div><kbd>n</kbd> new session here</div>
-        <div><kbd>f</kbd> fork the session</div>
-        <div><kbd>K</kbd> keep alive in tmux</div>
-        <div><kbd>Space</kbd> preview pane</div>
-        <div><kbd>/</kbd> search, with state: branch: since:</div>
+        <div><kbd>Enter</kbd> open here (focus, attach or resume)</div>
+        <div><kbd>Space</kbd> preview (mark in select mode)</div>
+        <div><kbd>/</kbd> search</div>
         <div><kbd>Tab</kbd> cycle scope</div>
-        <div><kbd>r</kbd> label</div>
-        <div><kbd>p</kbd> pin</div>
-        <div><kbd>a</kbd> archive now</div>
-        <div><kbd>y</kbd> copy the resume command</div>
-        <div><kbd>x</kbd> stop (twice)</div>
-        <div><kbd>D</kbd> delete (twice)</div>
-        <div><kbd>u</kbd> undo</div>
         <div><kbd>?</kbd> help</div>
+        <div><kbd>:</kbd> command palette</div>
+        <div><kbd>n</kbd> new session here</div>
+        <div><kbd>N</kbd> new session in row&#39;s dir</div>
+        <div><kbd>f</kbd> fork session</div>
+        <div><kbd>K</kbd> open and keep (tmux)</div>
+        <div><kbd>o</kbd> open in new tab</div>
+        <div><kbd>r</kbd> rename label</div>
+        <div><kbd>p</kbd> pin / unpin</div>
+        <div><kbd>H</kbd> hide / unhide</div>
+        <div><kbd>h</kbd> show hidden</div>
+        <div><kbd>t</kbd> tag</div>
+        <div><kbd>a</kbd> archive now</div>
+        <div><kbd>y</kbd> copy resume command</div>
+        <div><kbd>c</kbd> copy claude.ai link</div>
+        <div><kbd>x</kbd> stop (press twice)</div>
+        <div><kbd>D</kbd> remove from list (press twice)</div>
+        <div><kbd>S</kbd> setup</div>
+        <div><kbd>R</kbd> refresh</div>
+        <div><kbd>g</kbd> toggle ghosts</div>
+        <div><kbd>V</kbd> multi-select mode</div>
+        <div><kbd>u</kbd> undo last hide/remove</div>
+        <div><kbd>q / Esc</kbd> quit</div>
       </div>
     </section>
 

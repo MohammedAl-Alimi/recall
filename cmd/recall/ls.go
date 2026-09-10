@@ -57,6 +57,10 @@ type lsRow struct {
 	Headless      bool      `json:"headless"`
 	Ghost         bool      `json:"ghost"`
 	Archived      bool      `json:"archived"`
+	// ParseErrors counts transcript records the scanner did not recognise.
+	// A rising count across sessions is the documented signal that the
+	// transcript format changed (docs/compatibility.md).
+	ParseErrors int `json:"parseErrors"`
 }
 
 // projectName is the user-facing project name of a session: the basename of
@@ -96,6 +100,7 @@ func toLsRow(s *model.Session) lsRow {
 		Headless:      s.Headless,
 		Ghost:         s.Ghost,
 		Archived:      s.Archived,
+		ParseErrors:   s.ParseErrors,
 	}
 	for _, l := range s.PRs {
 		row.PRs = append(row.PRs, lsLink{URL: l.URL, Number: l.Number, Title: l.Title})
