@@ -45,6 +45,32 @@ falling back to polling if the stream drops.
 Keyboard: `/` focuses search, `j` and `k` move the selection, `Enter` opens
 the selected session, `Escape` clears the search.
 
+## Running it permanently
+
+`recall serve` stops when you close the terminal. To keep the dashboard up
+without one, install it as a login service:
+
+```sh
+recall service install --serve
+```
+
+That writes a launchd agent which runs `recall serve --no-open` at login and
+restarts it after a crash. The token is stored in `~/.recall/serve.token`
+and the address does not change, so the URL is stable enough to bookmark or
+to link from another dashboard:
+
+```sh
+recall service url
+# http://127.0.0.1:4747/?t=4fa2e085621d33cfacb1c15723a51072
+```
+
+`recall service url` prints that line and nothing else, so it pipes cleanly
+into a browser or a link generator. `recall service status` says whether the
+job is loaded and which pid is serving. macOS only.
+
+See [docs/service.md](service.md) for the property list, the log files and
+the uninstall path.
+
 ## Security
 
 The dashboard shows your prompts and answers, so it is built to stay on the
