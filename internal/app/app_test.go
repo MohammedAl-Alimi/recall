@@ -676,3 +676,404 @@ func ids(list []*model.Session) string {
 	}
 	return strings.Join(out, ",")
 }
+
+func TestRefreshLiveAttachesMux(t *testing.T) {
+	a := newTestApp(t)
+	a.d.scan = func(context.Context) ([]*model.Session, error) {
+		return []*model.Session{
+			{ID: sidA, Title: "kept by name", Cwd: "/home/u/dev/webapp", LastActive: ago(time.Minute)},
+			{ID: sidB, Title: "kept by pane pid", Cwd: "/home/u/dev/webapp", LastActive: ago(time.Minute)},
+			{ID: sidC, Title: "plain live", Cwd: "/home/u/dev/webapp", LastActive: ago(time.Minute)},
+		}, nil
+	}
+	a.d.probe = func(context.Context) (map[string]*model.Live, error) {
+		return map[string]*model.Live{
+			sidA: {PID: 100, Alive: true, Status: "idle", SessionID: sidA},
+			sidB: {PID: 200, Alive: true, Status: "busy", SessionID: sidB},
+			sidC: {PID: 300, Alive: true, Status: "idle", SessionID: sidC, HostApp: "Terminal", TTY: "ttys004"},
+		}, nil
+	}
+	a.d.muxList = func() ([]model.MuxInfo, error) {
+		return []model.MuxInfo{
+			{Socket: "recall", SessionName: "rc-aaaa1111", PanePID: 9999, Attached: true},
+			{Socket: "recall", SessionName: "rc-other000", PanePID: 200},
+		}, nil
+	}
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	by := byID(a)
+
+	mA := by[sidA].Live.Mux
+	if mA == nil || mA.SessionName != "rc-aaaa1111" || mA.Socket != "recall" || !mA.Attached {
+		t.Fatalf("sidA Mux = %+v, want the rc-aaaa1111 pane", mA)
+	}
+	mB := by[sidB].Live.Mux
+	if mB == nil || mB.SessionName != "rc-other000" || mB.PanePID != 200 {
+		t.Fatalf("sidB Mux = %+v, want the pane whose pid matches", mB)
+	}
+	if by[sidC].Live.Mux != nil {
+		t.Errorf("sidC must not be matched to any pane, got %+v", by[sidC].Live.Mux)
+	}
+	if by[sidA].State != model.StateKept || by[sidB].State != model.StateKept || by[sidC].State != model.StateLiveIdle {
+		t.Errorf("states = %s %s %s", by[sidA].State, by[sidB].State, by[sidC].State)
+	}
+
+	// The real planner now reaches the attach tier for a kept session.
+	act, err := launch.Plan(by[sidA], launch.Options{TermProgram: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if act.Kind != launch.KindAttach || strings.Join(act.Argv, " ") != "tmux -L recall attach-session -t rc-aaaa1111" {
+		t.Errorf("kept session should plan a tmux attach, got %s %v", act.Kind, act.Argv)
+	}
+
+	// A refresh with the pane gone keeps the process live but drops Mux.
+	a.d.muxList = func() ([]model.MuxInfo, error) { return nil, nil }
+	if err := a.RefreshLive(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if by := byID(a); by[sidA].Live.Mux != nil || by[sidA].State != model.StateLiveIdle {
+		t.Errorf("after the pane vanished: Mux=%+v state=%s", by[sidA].Live.Mux, by[sidA].State)
+	}
+}
+
+// TestOpenNewTabWrapsScriptAndProbesLock covers the new-tab resume path:
+// the lock is only probed here (the tab takes its own through
+// 'recall open --in-place'), and the osascript runs that wrapper instead
+// of a bare 'claude --resume'.
+func TestOpenNewTabWrapsScriptAndProbesLock(t *testing.T) {
+	a := newTestApp(t)
+	a.Sessions = baseSessions()
+	sess := a.Sessions[0]
+	a.d.executable = func() (string, error) { return "/opt/bin/recall", nil }
+	a.d.plan = func(sess *model.Session, opts launch.Options) (*launch.Action, error) {
+		act, _ := fakePlan(sess, opts)
+		cmd := strings.Join(act.Argv, " ")
+		if strings.HasPrefix(opts.TermProgram, "iTerm") {
+			act.Script = launch.NewITermTabScript(act.Cwd, cmd)
+		} else {
+			act.Script = launch.NewTerminalTabScript(act.Cwd, cmd)
+		}
+		return act, nil
+	}
+	var locked *os.File
+	lockCalls := 0
+	a.d.lock = func(p model.Paths, sid string) (*os.File, error) {
+		lockCalls++
+		f, err := os.CreateTemp(p.RecallDir, "lock")
+		locked = f
+		return f, err
+	}
+
+	act, err := a.Open(sess, launch.Options{TermProgram: "Apple_Terminal", Name: "my name", PermMode: "plan"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if lockCalls != 1 {
+		t.Errorf("lock probed %d times, want 1", lockCalls)
+	}
+	if a.HoldsLock(sidA) {
+		t.Error("new-tab Open must not keep the lock in this process")
+	}
+	if locked != nil {
+		if _, err := locked.Stat(); err == nil {
+			t.Error("probe lock file still open after Open")
+		}
+	}
+	if !strings.Contains(act.Script, `tell application "Terminal"`) {
+		t.Errorf("script lost its Terminal wrapper:\n%s", act.Script)
+	}
+	want := "/opt/bin/recall open " + sidA + " --in-place --name 'my name' --permission-mode plan"
+	if !strings.Contains(act.Script, want) {
+		t.Errorf("script does not run the in-place wrapper %q:\n%s", want, act.Script)
+	}
+	if strings.Contains(act.Script, "claude --resume") {
+		t.Errorf("script still runs a bare claude --resume:\n%s", act.Script)
+	}
+	if act.Argv[0] != "claude" {
+		t.Errorf("argv rewritten: %v", act.Argv)
+	}
+
+	// iTerm keeps its own script shape.
+	act, err = a.Open(sess, launch.Options{TermProgram: "iTerm.app"})
+	if err != nil {
+		t.Fatalf("iTerm Open: %v", err)
+	}
+	if !strings.Contains(act.Script, `tell application "iTerm2"`) || !strings.Contains(act.Script, "/opt/bin/recall open "+sidA+" --in-place") {
+		t.Errorf("iTerm script = %s", act.Script)
+	}
+
+	// Dry run still shows the wrapper but never touches the lock.
+	lockCalls = 0
+	act, err = a.Open(sess, launch.Options{TermProgram: "Apple_Terminal", DryRun: true})
+	if err != nil {
+		t.Fatalf("dry Open: %v", err)
+	}
+	if lockCalls != 0 || !strings.Contains(act.Script, "--in-place") {
+		t.Errorf("dry run: lockCalls=%d script=%s", lockCalls, act.Script)
+	}
+
+	// A session already open elsewhere is refused before any tab opens.
+	a.LiveByID[sidA] = &model.Live{PID: 515}
+	a.d.lock = func(model.Paths, string) (*os.File, error) { return nil, live.ErrLocked }
+	if _, err := a.Open(sess, launch.Options{TermProgram: "Apple_Terminal"}); err == nil || !strings.Contains(err.Error(), "already open (pid 515)") {
+		t.Errorf("locked new-tab Open = %v", err)
+	}
+
+	// Forks never lock, so their script is left alone.
+	delete(a.LiveByID, sidA)
+	act, err = a.Open(sess, launch.Options{TermProgram: "Apple_Terminal", Fork: true})
+	if err != nil {
+		t.Fatalf("fork Open: %v", err)
+	}
+	if strings.Contains(act.Script, "--in-place") || !strings.Contains(act.Script, "--fork-session") {
+		t.Errorf("fork script = %s", act.Script)
+	}
+}
+
+// TestReleaseLocksAndLockPID uses the real flock: the lock file names the
+// holder pid and ReleaseLocks frees every held lock so the same process can
+// open the session again (the Ctrl-G widget loop).
+func TestReleaseLocksAndLockPID(t *testing.T) {
+	a := newTestApp(t)
+	a.d.lock = live.Lock
+	sess := baseSessions()[0]
+	a.Sessions = []*model.Session{sess}
+	if _, err := a.Open(sess, launch.Options{InPlace: true}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(a.Paths.RecallDir, "locks", sidA))
+	if err != nil {
+		t.Fatalf("lock file: %v", err)
+	}
+	if strings.TrimSpace(string(b)) != fmt.Sprint(os.Getpid()) {
+		t.Errorf("lock file = %q, want pid %d", b, os.Getpid())
+	}
+	other, _ := New(a.Paths)
+	other.d = a.d
+	if _, err := other.Open(sess, launch.Options{InPlace: true}); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Errorf("second process Open = %v, want already open (pid %d)", err, os.Getpid())
+	}
+
+	a.ReleaseLocks()
+	if a.HoldsLock(sidA) || live.IsLocked(a.Paths, sidA) {
+		t.Fatal("ReleaseLocks left the lock held")
+	}
+	if _, err := a.Open(sess, launch.Options{InPlace: true}); err != nil {
+		t.Fatalf("Open after ReleaseLocks: %v", err)
+	}
+	a.ReleaseLocks()
+}
+
+// TestLoadKeepsInMemoryMetaEdits reloads while the UI has unsaved edits:
+// they must survive, while changes another process wrote to meta.json are
+// merged in.
+func TestLoadKeepsInMemoryMetaEdits(t *testing.T) {
+	a := newTestApp(t)
+	a.d.scan = func(context.Context) ([]*model.Session, error) { return baseSessions(), nil }
+	disk := state.NewMeta()
+	disk.Pin(sidB)
+	disk.SetLabel(sidC, "old")
+	a.d.loadMeta = func(model.Paths) (*state.Meta, error) { return cloneMeta(disk), nil }
+	var saved *state.Meta
+	a.d.saveMeta = func(_ model.Paths, m *state.Meta) error { saved = m; return nil }
+
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	live := a.Meta
+	if !live.IsPinned(sidB) || live.Labels[sidC] != "old" {
+		t.Fatalf("first load meta = %+v", live)
+	}
+
+	// Unsaved in-memory edits.
+	a.EditMeta(func(m *state.Meta) {
+		m.Hide(sidA)
+		m.SetLabel(sidA, "mine")
+		m.Tags[sidA] = []string{"urgent"}
+		m.TrashAdd(sidC)
+	})
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load 2: %v", err)
+	}
+	if a.Meta != live {
+		t.Fatal("Load replaced the live Meta object")
+	}
+	by := byID(a)
+	if !by[sidA].Hidden || by[sidA].Label != "mine" || len(by[sidA].Tags) != 1 || !by[sidC].Hidden {
+		t.Errorf("in-memory edits lost on rescan: %+v %+v", by[sidA], by[sidC])
+	}
+
+	// Another process edits meta.json: a new label on B, the pin on B
+	// removed, C's label cleared. Our own unsaved edits stay.
+	disk.Unpin(sidB)
+	disk.SetLabel(sidB, "external")
+	disk.SetLabel(sidC, "")
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load 3: %v", err)
+	}
+	by = byID(a)
+	if by[sidB].Pinned || by[sidB].Label != "external" || by[sidC].Label != "" {
+		t.Errorf("external edits not merged: %+v %+v", by[sidB], by[sidC])
+	}
+	if !by[sidA].Hidden || by[sidA].Label != "mine" || !by[sidC].Hidden {
+		t.Errorf("in-memory edits lost on merge: %+v %+v", by[sidA], by[sidC])
+	}
+
+	// SaveMeta writes a snapshot, not the live object, and the next Load
+	// treats what we wrote as the disk baseline.
+	if err := a.SaveMeta(); err != nil {
+		t.Fatalf("SaveMeta: %v", err)
+	}
+	if saved == nil || saved == a.Meta || !saved.IsHidden(sidA) || saved.Labels[sidB] != "external" {
+		t.Errorf("saved snapshot = %+v", saved)
+	}
+	disk = saved
+	a.EditMeta(func(m *state.Meta) { m.Unhide(sidA) })
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load 4: %v", err)
+	}
+	if byID(a)[sidA].Hidden {
+		t.Error("unhide after save was reverted by Load")
+	}
+
+	// An unreadable meta.json keeps the live object untouched.
+	a.d.loadMeta = func(model.Paths) (*state.Meta, error) { return nil, errors.New("corrupt") }
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load 5: %v", err)
+	}
+	if a.Meta != live || byID(a)[sidB].Label != "external" || len(a.Warnings) == 0 {
+		t.Errorf("meta read failure lost state: %+v warnings=%v", a.Meta, a.Warnings)
+	}
+}
+
+func TestMergeMeta(t *testing.T) {
+	oldDisk := state.NewMeta()
+	oldDisk.Pin("a")
+	oldDisk.Pin("b")
+	oldDisk.Hide("h")
+	oldDisk.Labels["a"] = "A"
+	oldDisk.Notes["n"] = "note"
+	oldDisk.Tags["t"] = []string{"x"}
+	oldDisk.TrashAdd("tr")
+
+	live := cloneMeta(oldDisk)
+	live.Pin("c")   // local add
+	live.Unpin("a") // local remove
+	live.Labels["l"] = "local"
+	live.Tags["t"] = []string{"x", "y"}
+
+	newDisk := cloneMeta(oldDisk)
+	newDisk.Unpin("b") // external remove
+	newDisk.Pin("d")   // external add
+	newDisk.Unhide("h")
+	newDisk.Labels["a"] = "A2"
+	delete(newDisk.Notes, "n")
+	newDisk.Tags["t2"] = []string{"z"}
+	newDisk.TrashRestore("tr")
+	newDisk.TrashAdd("tr2")
+
+	mergeMeta(live, oldDisk, newDisk)
+	if got := strings.Join(live.Pinned, ","); got != "c,d" {
+		t.Errorf("pinned = %s, want c,d", got)
+	}
+	if len(live.Hidden) != 0 {
+		t.Errorf("hidden = %v", live.Hidden)
+	}
+	if live.Labels["a"] != "A2" || live.Labels["l"] != "local" {
+		t.Errorf("labels = %v", live.Labels)
+	}
+	if _, ok := live.Notes["n"]; ok {
+		t.Errorf("external note delete not applied")
+	}
+	if got := strings.Join(live.Tags["t"], ","); got != "x,y" {
+		t.Errorf("local tags overwritten: %s", got)
+	}
+	if got := strings.Join(live.Tags["t2"], ","); got != "z" {
+		t.Errorf("external tags missing: %s", got)
+	}
+	if len(live.Trash) != 1 || live.Trash[0].SID != "tr2" {
+		t.Errorf("trash = %+v", live.Trash)
+	}
+}
+
+// TestMetaEditsDuringLoad hammers EditMeta while Load merges and applies
+// meta in another goroutine; a concurrent map write would crash the test.
+func TestMetaEditsDuringLoad(t *testing.T) {
+	a := newTestApp(t)
+	a.d.scan = func(context.Context) ([]*model.Session, error) { return baseSessions(), nil }
+	a.d.loadMeta = func(model.Paths) (*state.Meta, error) {
+		m := state.NewMeta()
+		m.SetLabel(sidB, fmt.Sprint(time.Now().UnixNano()))
+		return m, nil
+	}
+	a.d.saveMeta = func(model.Paths, *state.Meta) error { return nil }
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			_ = a.Load(context.Background(), false)
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		a.EditMeta(func(m *state.Meta) {
+			m.SetLabel(sidA, fmt.Sprint(i))
+			m.Tags[sidA] = []string{"t"}
+			if i%2 == 0 {
+				m.Hide(sidA)
+			} else {
+				m.Unhide(sidA)
+			}
+		})
+		if i%10 == 0 {
+			_ = a.SaveMeta()
+			a.ApplyMeta()
+		}
+	}
+	<-done
+}
+
+// TestLoadAttachesLaunchRecords: sessions get their recorded launch so
+// resume can replay flags and the preview can show the argv.
+func TestLoadAttachesLaunchRecords(t *testing.T) {
+	a := newTestApp(t)
+	a.d.scan = func(context.Context) ([]*model.Session, error) { return baseSessions(), nil }
+	a.d.loadLaunch = func(_ model.Paths, sid string) (*model.Launch, error) {
+		switch sid {
+		case sidA:
+			return &model.Launch{SID: sidA, Argv: []string{"claude", "--model", "opus"}, Cwd: "/home/u/dev/webapp"}, nil
+		case sidC:
+			return nil, errors.New("corrupt record")
+		}
+		return nil, nil
+	}
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	by := byID(a)
+	if by[sidA].Launch == nil || len(by[sidA].Launch.Argv) != 3 || by[sidA].Launch.Argv[2] != "opus" {
+		t.Errorf("A launch = %+v", by[sidA].Launch)
+	}
+	if by[sidB].Launch != nil {
+		t.Errorf("B launch = %+v, want nil", by[sidB].Launch)
+	}
+	if len(a.Warnings) != 1 || !strings.Contains(a.Warnings[0], "corrupt record") {
+		t.Errorf("warnings = %v", a.Warnings)
+	}
+
+	// Real state package round trip.
+	a.d.loadLaunch = state.LoadLaunch
+	if err := state.SaveLaunch(a.Paths, &model.Launch{SID: sidB, Argv: []string{"claude", "--add-dir", "../shared"}, Cwd: "/home/u/dev/recall"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Load(context.Background(), false); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if l := byID(a)[sidB].Launch; l == nil || l.Argv[1] != "--add-dir" {
+		t.Errorf("B launch from disk = %+v", l)
+	}
+}

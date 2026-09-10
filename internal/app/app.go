@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MohammedAl-Alimi/recall/internal/archive"
@@ -48,6 +49,8 @@ type deps struct {
 	degraded    func() (bool, string)
 	muxList     func() ([]model.MuxInfo, error)
 	loadMeta    func(p model.Paths) (*state.Meta, error)
+	saveMeta    func(p model.Paths, m *state.Meta) error
+	loadLaunch  func(p model.Paths, sid string) (*model.Launch, error)
 	retention   func(p model.Paths) (int, bool, error)
 	hasArchive  func(p model.Paths, sid string) (string, bool)
 	lock        func(p model.Paths, sid string) (*os.File, error)
@@ -55,6 +58,7 @@ type deps struct {
 	saveLaunch  func(p model.Paths, l *model.Launch) error
 	appendEvent func(p model.Paths, ev map[string]any) error
 	notify      func(title, body string) error
+	executable  func() (string, error)
 }
 
 // App is the shared application state.
@@ -87,6 +91,14 @@ type App struct {
 	d     deps
 	prev  map[string]model.State
 	locks map[string]*os.File
+
+	// metaMu guards Meta (and metaDisk). Load swaps or merges Meta from a
+	// background goroutine while the UI edits it, so both sides lock.
+	metaMu sync.Mutex
+	// metaDisk is a copy of what the last Load read from meta.json. Load
+	// diffs the next read against it to tell external edits apart from
+	// in-memory ones.
+	metaDisk *state.Meta
 }
 
 // New builds an App for p without loading anything.
@@ -111,6 +123,8 @@ func New(p model.Paths) (*App, error) {
 		degraded:    a.Prober.Degraded,
 		muxList:     a.Tmux.List,
 		loadMeta:    state.LoadMeta,
+		saveMeta:    state.SaveMeta,
+		loadLaunch:  state.LoadLaunch,
 		retention:   archive.Retention,
 		hasArchive:  archive.HasArchive,
 		lock:        live.Lock,
@@ -118,6 +132,7 @@ func New(p model.Paths) (*App, error) {
 		saveLaunch:  state.SaveLaunch,
 		appendEvent: state.AppendEvent,
 		notify:      notify.Send,
+		executable:  os.Executable,
 	}
 	return a, nil
 }
@@ -164,13 +179,9 @@ func (a *App) Load(ctx context.Context, includeGhosts bool) error {
 		}
 	}
 
-	if m, merr := a.d.loadMeta(a.Paths); merr != nil {
+	diskMeta, merr := a.d.loadMeta(a.Paths)
+	if merr != nil {
 		a.warn("meta: %v", merr)
-		if a.Meta == nil {
-			a.Meta = state.NewMeta()
-		}
-	} else if m != nil {
-		a.Meta = m
 	}
 
 	days, set, rerr := a.d.retention(a.Paths)
@@ -186,8 +197,18 @@ func (a *App) Load(ctx context.Context, includeGhosts bool) error {
 			compact = append(compact, s)
 		}
 	}
+	a.loadLaunches(compact)
+
+	a.metaMu.Lock()
+	if merr == nil {
+		a.installMeta(diskMeta)
+	}
+	if a.Meta == nil {
+		a.Meta = state.NewMeta()
+	}
 	a.Sessions = compact
 	a.applyMeta()
+	a.metaMu.Unlock()
 
 	if err := a.RefreshLive(ctx); err != nil {
 		return err
@@ -233,7 +254,30 @@ func (a *App) archivedOnly(known map[string]bool) []*model.Session {
 	return out
 }
 
+// loadLaunches attaches the recorded launch (argv, cwd) to every session
+// that has one so BuildResume can replay flags and the preview can show
+// how the session was started. A missing record is not an error.
+func (a *App) loadLaunches(sessions []*model.Session) {
+	if a.d.loadLaunch == nil {
+		return
+	}
+	for _, s := range sessions {
+		if s.Ghost {
+			continue
+		}
+		l, err := a.d.loadLaunch(a.Paths, s.ID)
+		if err != nil {
+			a.warn("launch %s: %v", model.ShortID(s.ID), err)
+			continue
+		}
+		if l != nil {
+			s.Launch = l
+		}
+	}
+}
+
 // applyMeta copies labels, pins, hidden flags, notes and tags onto sessions.
+// Callers hold metaMu.
 func (a *App) applyMeta() {
 	if a.Meta == nil {
 		return
@@ -258,7 +302,11 @@ func (a *App) applyMeta() {
 // ApplyMeta re-applies a.Meta onto the loaded sessions. Call it after
 // editing Meta in place (pin, label, hide) so the list reflects the change
 // without a rescan.
-func (a *App) ApplyMeta() { a.applyMeta() }
+func (a *App) ApplyMeta() {
+	a.metaMu.Lock()
+	defer a.metaMu.Unlock()
+	a.applyMeta()
+}
 
 // RefreshLive re-probes live processes and re-derives states.
 func (a *App) RefreshLive(ctx context.Context) error {
@@ -285,9 +333,33 @@ func (a *App) RefreshLive(ctx context.Context) error {
 	}
 	a.Panes = panes
 
+	a.attachMux()
 	a.applyWaitingEvents()
 	a.derive()
 	return nil
+}
+
+// attachMux fills Live.Mux for every live process that runs inside a kept
+// tmux session, matched by the rc-<short> session name or by the pane pid.
+// Without it the launch attach tier and the tmux kill path never fire.
+func (a *App) attachMux() {
+	if len(a.Panes) == 0 {
+		return
+	}
+	for sid, lv := range a.LiveByID {
+		if lv == nil || lv.Mux != nil {
+			continue
+		}
+		name := "rc-" + model.ShortID(sid)
+		for i := range a.Panes {
+			p := a.Panes[i]
+			if p.SessionName == name || (lv.PID > 0 && p.PanePID > 0 && p.PanePID == lv.PID) {
+				m := p
+				lv.Mux = &m
+				break
+			}
+		}
+	}
 }
 
 // derive recomputes every session state, remembering the previous states
@@ -514,9 +586,23 @@ func (a *App) Open(sess *model.Session, opts launch.Options) (*launch.Action, er
 		return nil, errors.New("launch plan returned nothing")
 	}
 
-	if action.Kind == "resume" && !opts.Fork && !opts.DryRun {
-		if err := a.acquire(sess); err != nil {
-			return nil, err
+	if action.Kind == "resume" && !opts.Fork {
+		if action.Script != "" {
+			// The claude process will run in a new tab, so a lock held by this
+			// process would be dropped the moment it exits (or, in the TUI,
+			// never released). Let the tab take the lock itself by running
+			// 'recall open <sid> --in-place' there; here only probe it so the
+			// user learns at once when the session is already open.
+			if !opts.DryRun {
+				if err := a.probeLock(sess); err != nil {
+					return nil, err
+				}
+			}
+			a.wrapTabScript(action, sess, opts)
+		} else if !opts.DryRun {
+			if err := a.acquire(sess); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -565,8 +651,80 @@ func (a *App) acquire(sess *model.Session) error {
 	if err != nil {
 		return fmt.Errorf("already open (pid %s): %w", a.lockHolder(sess, f), err)
 	}
+	writeLockPID(f)
 	a.locks[sess.ID] = f
 	return nil
+}
+
+// probeLock takes and immediately releases the session lock so an
+// already-open session is reported without this process keeping the lock.
+func (a *App) probeLock(sess *model.Session) error {
+	if _, held := a.locks[sess.ID]; held {
+		return fmt.Errorf("already open (pid %d)", os.Getpid())
+	}
+	f, err := a.d.lock(a.Paths, sess.ID)
+	if err != nil {
+		return fmt.Errorf("already open (pid %s): %w", a.lockHolder(sess, f), err)
+	}
+	if f != nil {
+		_ = f.Close()
+	}
+	return nil
+}
+
+// writeLockPID stores this process id in the lock file so lockHolder can
+// name the holder when the live registry does not know it. After an exec
+// the pid is claude's own.
+func writeLockPID(f *os.File) {
+	if f == nil {
+		return
+	}
+	if err := f.Truncate(0); err != nil {
+		return
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	_, _ = f.WriteString(strconv.Itoa(os.Getpid()) + "\n")
+}
+
+// wrapTabScript rewrites the new-tab script of a resume action so the tab
+// runs 'recall open <sid> --in-place' (which locks, then execs claude with
+// the lock inherited) instead of a bare 'claude --resume'.
+func (a *App) wrapTabScript(action *launch.Action, sess *model.Session, opts launch.Options) {
+	argv := a.tabArgv(sess, opts)
+	cmd := strings.Join(quoteAll(argv), " ")
+	if strings.HasPrefix(opts.TermProgram, "iTerm") {
+		action.Script = launch.NewITermTabScript(action.Cwd, cmd)
+	} else {
+		action.Script = launch.NewTerminalTabScript(action.Cwd, cmd)
+	}
+}
+
+// tabArgv is the command a new tab runs to resume sess under its own lock.
+func (a *App) tabArgv(sess *model.Session, opts launch.Options) []string {
+	exe := "recall"
+	if a.d.executable != nil {
+		if p, err := a.d.executable(); err == nil && p != "" {
+			exe = p
+		}
+	}
+	argv := []string{exe, "open", sess.ID, "--in-place"}
+	if opts.Name != "" {
+		argv = append(argv, "--name", opts.Name)
+	}
+	if opts.PermMode != "" {
+		argv = append(argv, "--permission-mode", opts.PermMode)
+	}
+	return argv
+}
+
+func quoteAll(argv []string) []string {
+	out := make([]string, len(argv))
+	for i, v := range argv {
+		out[i] = launch.ShellQuote(v)
+	}
+	return out
 }
 
 // lockHolder guesses who holds the lock: the live process if known, else a
@@ -594,6 +752,16 @@ func (a *App) lockHolder(sess *model.Session, f *os.File) string {
 // failed or after the session was handed to another terminal tab.
 func (a *App) ReleaseLock(sid string) {
 	if f, ok := a.locks[sid]; ok {
+		f.Close()
+		delete(a.locks, sid)
+	}
+}
+
+// ReleaseLocks drops every session lock this App holds. The widget loop
+// calls it once the child claude has exited, otherwise the still-open
+// descriptor keeps the session "already open" for the life of the process.
+func (a *App) ReleaseLocks() {
+	for sid, f := range a.locks {
 		f.Close()
 		delete(a.locks, sid)
 	}
