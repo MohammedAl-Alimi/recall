@@ -1,11 +1,6 @@
 package state
 
-import (
-	"errors"
-	"time"
-
-	"github.com/MohammedAl-Alimi/recall/internal/model"
-)
+import "time"
 
 // SchemaVersion is the current Meta schema.
 const SchemaVersion = 1
@@ -35,16 +30,6 @@ func NewMeta() *Meta {
 		Notes:  map[string]string{},
 		Tags:   map[string][]string{},
 	}
-}
-
-// LoadMeta reads RecallDir/meta.json, returning an empty Meta when missing.
-func LoadMeta(p model.Paths) (*Meta, error) {
-	return nil, errors.New("not implemented: state.LoadMeta")
-}
-
-// SaveMeta writes meta atomically under the state lock.
-func SaveMeta(p model.Paths, m *Meta) error {
-	return errors.New("not implemented: state.SaveMeta")
 }
 
 // IsPinned reports whether sid is pinned.
@@ -112,31 +97,6 @@ func (m *Meta) TrashPrune(days int) []string {
 	}
 	m.Trash = out
 	return pruned
-}
-
-// SaveLaunch stores a launch record under RecallDir/launch/<sid>.json.
-func SaveLaunch(p model.Paths, l *model.Launch) error {
-	return errors.New("not implemented: state.SaveLaunch")
-}
-
-// LoadLaunch reads the launch record for sid.
-func LoadLaunch(p model.Paths, sid string) (*model.Launch, error) {
-	return nil, errors.New("not implemented: state.LoadLaunch")
-}
-
-// AppendEvent appends one JSON line to RecallDir/events.jsonl.
-func AppendEvent(p model.Paths, ev map[string]any) error {
-	return errors.New("not implemented: state.AppendEvent")
-}
-
-// SnapshotLastBoot records the session ids seen at this boot.
-func SnapshotLastBoot(p model.Paths, sids []string) error {
-	return errors.New("not implemented: state.SnapshotLastBoot")
-}
-
-// LoadLastBoot returns the session ids recorded by SnapshotLastBoot.
-func LoadLastBoot(p model.Paths) ([]string, error) {
-	return nil, errors.New("not implemented: state.LoadLastBoot")
 }
 
 func contains(list []string, s string) bool {
