@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -101,19 +102,38 @@ func planNew(t *mux.Tmux, sid, name, cwd string, keep bool, extra []string) ([]*
 	}, nil
 }
 
+// planNewIn plans a fresh session that opens in a new Terminal.app or iTerm2
+// tab or in a new cmux workspace (--terminal) instead of in place. With keep
+// the tab runs claude inside a tmux session on recall's socket. The single
+// action is executed by launch.Run, which returns once the tab or workspace
+// is open.
+func planNewIn(name, cwd string, keep bool, extra []string, terminal string) (*launch.Action, error) {
+	act, err := launch.PlanNew(launch.Options{
+		Cwd: cwd, Name: name, ExtraArgs: extra, Keep: keep,
+		Terminal: terminal, TermProgram: termProgramFor(terminal),
+	})
+	if err != nil {
+		return nil, err
+	}
+	act.Description = "start a new claude session in " + cwd + strings.TrimPrefix(act.Description, "new session in "+cwd)
+	return act, nil
+}
+
 func newNewCmd() *cobra.Command {
 	var (
-		name, cwd string
-		keep      bool
+		name, cwd, terminal string
+		keep                bool
 	)
 	cmd := &cobra.Command{
-		Use:   "new [-n name] [--keep] [--cwd dir] [-- claude args]",
+		Use:   "new [-n name] [--keep] [--cwd dir] [--terminal cmux] [-- claude args]",
 		Short: "Start a new session here",
 		Long: `new starts a fresh claude session in the current directory (or --cwd).
 Arguments after -- are passed to claude; a bypassPermissions request is
 dropped and reported, never forwarded. With --keep the session
 runs inside a tmux session on recall's private socket so it survives the
-terminal tab; detach with Ctrl-\ and reattach from the list.`,
+terminal tab; detach with Ctrl-\ and reattach from the list. With
+--terminal the session opens in a new Terminal.app or iTerm2 tab or in a
+new cmux workspace instead of this terminal.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir, err := resolveCwd(cwd)
 			if err != nil {
@@ -125,11 +145,24 @@ terminal tab; detach with Ctrl-\ and reattach from the list.`,
 			if keep {
 				sid = newSessionID()
 			}
+			out := cmd.OutOrStdout()
+			if terminal != "" {
+				act, err := planNewIn(name, dir, keep, args, terminal)
+				if err != nil {
+					return err
+				}
+				if dryRun() {
+					printAction(out, act)
+					return nil
+				}
+				// A tab or cmux workspace: launch.Run opens it and returns;
+				// the new session runs over there.
+				return launch.Run(act)
+			}
 			actions, err := planNew(mux.NewTmux(), sid, name, dir, keep, args)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 			if dryRun() {
 				for _, act := range actions {
 					printAction(out, act)
@@ -166,5 +199,6 @@ terminal tab; detach with Ctrl-\ and reattach from the list.`,
 	cmd.Flags().StringVarP(&name, "name", "n", "", "session name (claude -n)")
 	cmd.Flags().BoolVar(&keep, "keep", false, "run inside a kept tmux session")
 	cmd.Flags().StringVar(&cwd, "cwd", "", "working directory (default: current)")
+	cmd.Flags().StringVarP(&terminal, "terminal", "t", "", "open in a new tab or workspace: terminal, iterm or cmux")
 	return cmd
 }

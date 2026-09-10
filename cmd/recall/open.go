@@ -172,6 +172,12 @@ func runAction(act *launch.Action, w io.Writer) error {
 		printAction(w, act)
 		return nil
 	}
+	if act.Terminal == launch.TerminalCmux {
+		// The argv is a cmux CLI call, not claude; launch.Run starts the
+		// app when needed and runs it as a child so recall can report an
+		// error instead of replacing itself with the CLI.
+		return launch.Run(act)
+	}
 	switch act.Kind {
 	case "resume", "new", "attach":
 		if act.Script == "" && len(act.Argv) > 0 {
@@ -180,6 +186,21 @@ func runAction(act *launch.Action, w io.Writer) error {
 		}
 	}
 	return launch.Run(act)
+}
+
+// termProgramFor returns the TermProgram to hand to the app for a forced
+// --terminal choice. The app rewrites a new-tab script from TermProgram so
+// the tab resumes under its own lock; aligning TermProgram with the choice
+// keeps that rewrite on the terminal the user asked for. cmux and auto
+// keep the real TERM_PROGRAM.
+func termProgramFor(terminal string) string {
+	switch strings.ToLower(terminal) {
+	case launch.TerminalApp:
+		return "Apple_Terminal"
+	case launch.TerminalITerm:
+		return "iTerm.app"
+	}
+	return os.Getenv("TERM_PROGRAM")
 }
 
 // runHolding runs act for an App that may hold session lock files. The App
@@ -225,7 +246,7 @@ or a label set with 'r' in the list.`,
 			if err != nil {
 				return err
 			}
-			opts.TermProgram = os.Getenv("TERM_PROGRAM")
+			opts.TermProgram = termProgramFor(opts.Terminal)
 			opts.Name = name
 			opts.PermMode = permMode
 			if dryRun() {
@@ -242,7 +263,8 @@ or a label set with 'r' in the list.`,
 			return runHolding(a, act, cmd.OutOrStdout())
 		},
 	}
-	cmd.Flags().BoolVar(&opts.NewTab, "new-tab", false, "open in a new Terminal.app or iTerm2 tab instead of this terminal")
+	cmd.Flags().BoolVar(&opts.NewTab, "new-tab", false, "open in a new terminal tab or cmux workspace instead of this terminal")
+	cmd.Flags().StringVarP(&opts.Terminal, "terminal", "t", "", "where to open the tab: terminal, iterm or cmux (implies --new-tab)")
 	cmd.Flags().BoolVar(&opts.Keep, "keep", false, "run inside a kept tmux session that survives the tab")
 	cmd.Flags().BoolVar(&opts.Fork, "fork", false, "fork the session (--fork-session) instead of resuming it")
 	cmd.Flags().BoolVar(&opts.InPlace, "in-place", false, "replace the current shell with claude (the default; wins over --new-tab)")
