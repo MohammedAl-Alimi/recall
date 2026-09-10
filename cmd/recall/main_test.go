@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/MohammedAl-Alimi/recall/internal/launch"
+	"github.com/MohammedAl-Alimi/recall/internal/live"
 	"github.com/MohammedAl-Alimi/recall/internal/model"
+	"github.com/MohammedAl-Alimi/recall/internal/mux"
 )
 
 // isolate points every path at temp dirs so no test can touch ~/.claude or
@@ -170,8 +173,24 @@ func TestExitCodes(t *testing.T) {
 	if code, _, _ := execCLI(t, "", "archive"); code != exitUsage {
 		t.Fatalf("archive without args should exit %d, got %d", exitUsage, code)
 	}
-	if code, out, _ := execCLI(t, "", "index"); code != 0 || out != "not yet\n" {
-		t.Fatalf("index: code=%d out=%q", code, out)
+	if code, out, errOut := execCLI(t, "", "index"); code != exitFailure || out != "" || !strings.Contains(errOut, "not available") {
+		t.Fatalf("index: code=%d out=%q err=%q", code, out, errOut)
+	}
+}
+
+func TestIndexIsHiddenFromHelp(t *testing.T) {
+	isolate(t)
+	root := newRoot()
+	idx, _, err := root.Find([]string{"index"})
+	if err != nil || idx.Name() != "index" || !idx.Hidden {
+		t.Fatalf("index should stay registered but hidden: cmd=%v hidden=%v err=%v", idx, idx != nil && idx.Hidden, err)
+	}
+	code, out, _ := execCLI(t, "", "--help")
+	if code != 0 {
+		t.Fatalf("help exit %d", code)
+	}
+	if strings.Contains(out, "index") || strings.Contains(out, "not yet") {
+		t.Fatalf("--help should not advertise the index command:\n%s", out)
 	}
 }
 
@@ -279,7 +298,7 @@ func TestLsTableAndFilters(t *testing.T) {
 		{ID: "22222222-0000-4000-8000-000000000000", Title: "beta", Label: "b", Cwd: "/w/beta", State: model.StateClosed, LastActive: now.Add(-49 * time.Hour)},
 	}
 	var buf bytes.Buffer
-	writeLsTable(&buf, list, now)
+	writeLsTable(&buf, list, now, 0)
 	out := buf.String()
 	if !strings.Contains(out, "11111111") || !strings.Contains(out, "Running") || !strings.Contains(out, "b: beta") || !strings.Contains(out, "2d") {
 		t.Fatalf("table:\n%s", out)
@@ -316,26 +335,90 @@ func TestNewSessionIDAndArgv(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	argv := newClaudeArgv("api", []string{"--model", "opus"})
-	if strings.Join(argv, " ") != "claude -n api --model opus" {
-		t.Fatalf("argv = %v", argv)
+	dir := t.TempDir()
+	argv, note, err := newClaudeArgv(dir, "api", []string{"--model", "opus"})
+	if err != nil || note != "" || strings.Join(argv, " ") != "claude -n api --model opus" {
+		t.Fatalf("argv = %v note=%q err=%v", argv, note, err)
 	}
-	if argv := newClaudeArgv("", nil); strings.Join(argv, " ") != "claude" {
-		t.Fatalf("argv = %v", argv)
+	if argv, note, err := newClaudeArgv(dir, "", nil); err != nil || note != "" || strings.Join(argv, " ") != "claude" {
+		t.Fatalf("argv = %v note=%q err=%v", argv, note, err)
+	}
+	if _, _, err := newClaudeArgv(filepath.Join(dir, "missing"), "", nil); err == nil {
+		t.Fatal("missing cwd must error")
+	}
+}
+
+// TestNewArgvScrubsBypass pins the launch contract for 'recall new': a
+// bypassPermissions request never reaches claude, in any spelling, and the
+// drop is reported through the action note.
+func TestNewArgvScrubsBypass(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	cases := [][]string{
+		{"--dangerously-skip-permissions"},
+		{"--allow-dangerously-skip-permissions", "--model", "opus"},
+		{"--model", "opus", "--permission-mode", "bypassPermissions"},
+		{"--permission-mode=bypassPermissions"},
+	}
+	for _, extra := range cases {
+		argv, note, err := newClaudeArgv(dir, "", extra)
+		if err != nil {
+			t.Fatalf("%v: %v", extra, err)
+		}
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "dangerously") || strings.Contains(joined, "bypassPermissions") {
+			t.Errorf("%v leaked into argv %q", extra, joined)
+		}
+		if note != "refused to pass bypassPermissions" {
+			t.Errorf("%v: note = %q", extra, note)
+		}
+		if strings.Contains(strings.Join(extra, " "), "--model") && !strings.Contains(joined, "--model opus") {
+			t.Errorf("%v: harmless flags must survive, got %q", extra, joined)
+		}
 	}
 }
 
 func TestPlanNewWithoutKeep(t *testing.T) {
 	isolate(t)
-	acts, err := planNew(nil, newSessionID(), "n", "/tmp/x", false, []string{"--verbose"})
+	dir := t.TempDir()
+	acts, err := planNew(nil, "", "n", dir, false, []string{"--verbose"})
 	if err != nil || len(acts) != 1 {
 		t.Fatalf("planNew = %v, %v", acts, err)
 	}
-	if acts[0].Kind != "new" || acts[0].Cwd != "/tmp/x" || strings.Join(acts[0].Argv, " ") != "claude -n n --verbose" {
+	if acts[0].Kind != "new" || acts[0].Cwd != dir || strings.Join(acts[0].Argv, " ") != "claude -n n --verbose" {
 		t.Fatalf("action = %+v", acts[0])
 	}
-	if got := commandLine(acts[0]); got != "cd /tmp/x && claude -n n --verbose" {
+	if got := commandLine(acts[0]); got != "cd "+launch.ShellQuote(dir)+" && claude -n n --verbose" {
 		t.Fatalf("commandLine = %q", got)
+	}
+}
+
+// TestPlanNewKeepScrubsBypass covers the --keep path: the tmux command that
+// starts claude carries the session id, the name and the scrubbed extras,
+// and the note travels on the create action so the caller can print it.
+func TestPlanNewKeepScrubsBypass(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	sid := newSessionID()
+	acts, err := planNew(mux.NewTmux(), sid, "kept", dir, true, []string{"--dangerously-skip-permissions", "--model", "opus"})
+	if err != nil || len(acts) != 2 {
+		t.Fatalf("planNew = %v, %v", acts, err)
+	}
+	create, attach := acts[0], acts[1]
+	if create.Kind != "new" || attach.Kind != "attach" || create.Note != "refused to pass bypassPermissions" {
+		t.Fatalf("actions = %+v / %+v", create, attach)
+	}
+	inner := create.Argv[len(create.Argv)-1]
+	for _, want := range []string{"--session-id " + sid, "-n kept", "--model opus", "RECALL_SID=" + sid} {
+		if !strings.Contains(inner, want) {
+			t.Errorf("kept command missing %q: %q", want, inner)
+		}
+	}
+	if strings.Contains(inner, "dangerously") {
+		t.Errorf("kept command leaked bypass flag: %q", inner)
+	}
+	if strings.Count(inner, "-n kept") != 1 {
+		t.Errorf("name must appear exactly once: %q", inner)
 	}
 }
 
@@ -351,6 +434,31 @@ func TestNewDryRun(t *testing.T) {
 	}
 	if code, _, errOut := execCLI(t, "", "new", "--cwd", filepath.Join(dir, "missing")); code != exitUsage || !strings.Contains(errOut, "missing") {
 		t.Fatalf("missing cwd: code=%d err=%q", code, errOut)
+	}
+}
+
+func TestNewDryRunDropsBypassAndKeepRecordsNothing(t *testing.T) {
+	_, recallDir := isolate(t)
+	dir := t.TempDir()
+	for _, keep := range []bool{false, true} {
+		args := []string{"new", "--cwd", dir}
+		if keep {
+			args = append(args, "--keep")
+		}
+		args = append(args, "--", "--dangerously-skip-permissions", "--model", "sonnet")
+		code, out, errOut := execCLI(t, "", args...)
+		if code != 0 {
+			t.Fatalf("keep=%v code=%d err=%q", keep, code, errOut)
+		}
+		if strings.Contains(out, "dangerously") || !strings.Contains(out, "--model sonnet") {
+			t.Fatalf("keep=%v out=%q", keep, out)
+		}
+		if !strings.Contains(out, "note: refused to pass bypassPermissions") {
+			t.Fatalf("keep=%v should report the dropped flag: %q", keep, out)
+		}
+	}
+	if entries, _ := os.ReadDir(filepath.Join(recallDir, "launch")); len(entries) != 0 {
+		t.Fatalf("dry run must not record a launch: %v", entries)
 	}
 }
 
@@ -463,5 +571,132 @@ func TestRunActionDryRunNeverExecs(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "claude --resume "+fixtureSID) {
 		t.Fatalf("dry run output = %q", buf.String())
+	}
+}
+
+// lsWidthFixture returns rows long enough to overflow every column.
+func lsWidthFixture(now time.Time) []*model.Session {
+	long := strings.Repeat("a very long title that keeps going ", 4)
+	return []*model.Session{
+		{ID: "11111111-0000-4000-8000-000000000000", Title: long, WorkCwd: "/w/" + strings.Repeat("project", 6), Branch: "feature/" + strings.Repeat("branch", 6), State: model.StateNeedsYou, LastActive: now.Add(-40 * 24 * time.Hour)},
+		{ID: "22222222-0000-4000-8000-000000000000", Title: long, Label: "label", Cwd: "/w/beta", Branch: "main", State: model.StateClosed, LastActive: now.Add(-49 * time.Hour)},
+		{ID: "33333333-0000-4000-8000-000000000000", Title: "short", Cwd: "/w/gamma", State: model.StateLiveIdle, LastActive: now},
+	}
+}
+
+func maxLineWidth(out string) int {
+	w := 0
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		w = max(w, len([]rune(line)))
+	}
+	return w
+}
+
+// TestLsTableFitsTerminalWidth is the regression for rows wrapping in 80
+// and 120 column terminals: every line fits, the branch column is dropped
+// when narrow, and the classic full layout is kept for pipes (width 0).
+func TestLsTableFitsTerminalWidth(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	list := lsWidthFixture(now)
+	for _, width := range []int{80, 100, 120, 200} {
+		var buf bytes.Buffer
+		writeLsTable(&buf, list, now, width)
+		out := buf.String()
+		if got := maxLineWidth(out); got > width {
+			t.Errorf("width %d: widest line is %d\n%s", width, got, out)
+		}
+		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		if len(lines) != len(list)+1 {
+			t.Errorf("width %d: %d lines for %d rows", width, len(lines), len(list))
+		}
+		hasBranch := strings.Contains(lines[0], "BRANCH")
+		if hasBranch != (width >= lsBranchMinCol) {
+			t.Errorf("width %d: BRANCH shown=%v", width, hasBranch)
+		}
+		if !strings.Contains(out, "label: a") || !strings.Contains(out, "Needs you") || !strings.Contains(out, "2026-08-01") {
+			t.Errorf("width %d: content missing\n%s", width, out)
+		}
+	}
+	var buf bytes.Buffer
+	writeLsTable(&buf, list, now, 0)
+	full := buf.String()
+	if !strings.Contains(full, "BRANCH") || maxLineWidth(full) <= 120 {
+		t.Fatalf("width 0 should print the full layout:\n%s", full)
+	}
+	l := lsLayoutFor(0, list, now)
+	if l.project != lsProjectMax || l.branch != lsBranchMax || l.title != lsTitleMax || !l.showBranch {
+		t.Fatalf("unlimited layout = %+v", l)
+	}
+	if l := lsLayoutFor(30, list, now); l.title != lsTitleMin || l.showBranch || l.project != len("PROJECT") {
+		t.Fatalf("tiny layout must clamp the title and shrink the project, got %+v", l)
+	}
+	// Narrow terminals shrink the branch column before dropping it.
+	if l := lsLayoutFor(100, list, now); !l.showBranch || l.branch != 11 || l.title != lsTitleMin {
+		t.Fatalf("100 columns should keep a shortened branch, got %+v", l)
+	}
+}
+
+func TestTermWidth(t *testing.T) {
+	if got := termWidth(&bytes.Buffer{}); got != 0 {
+		t.Fatalf("buffer is not a terminal, width = %d", got)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if got := termWidth(f); got != 0 {
+		t.Fatalf("regular file is not a terminal, width = %d", got)
+	}
+	for in, want := range map[string]int{"132": 132, " 80 ": 80, "": 0, "x": 0, "-5": 0} {
+		if got := widthFromEnv(in); got != want {
+			t.Errorf("widthFromEnv(%q) = %d want %d", in, got, want)
+		}
+	}
+}
+
+// TestOpenHoldsLockAcrossGC pins the invariant runHolding relies on: as
+// long as the App is reachable, a forced GC does not run the os.File
+// finalizer on the session lock, so the exec'ed claude inherits it held.
+func TestOpenHoldsLockAcrossGC(t *testing.T) {
+	claudeDir, _ := isolate(t)
+	t.Setenv("RECALL_DRY_RUN", "")
+	t.Setenv("TERM_PROGRAM", "")
+	writeFixture(t, claudeDir)
+	a, err := loadedApp(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := findSession(a.Sessions, fixtureSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, err := a.Open(sess, launch.Options{InPlace: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if act.Kind != "resume" || !a.HoldsLock(sess.ID) {
+		t.Fatalf("expected a locked resume, got kind=%q held=%v", act.Kind, a.HoldsLock(sess.ID))
+	}
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+	}
+	if !live.IsLocked(a.Paths, sess.ID) {
+		t.Fatal("lock released while the App is still reachable")
+	}
+	var buf bytes.Buffer
+	t.Setenv("RECALL_DRY_RUN", "1")
+	if err := runHolding(a, act, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "claude --resume "+fixtureSID) {
+		t.Fatalf("dry run output = %q", buf.String())
+	}
+	if !live.IsLocked(a.Paths, sess.ID) {
+		t.Fatal("lock must still be held after runHolding")
+	}
+	a.ReleaseLock(sess.ID)
+	if live.IsLocked(a.Paths, sess.ID) {
+		t.Fatal("lock should be free after release")
 	}
 }

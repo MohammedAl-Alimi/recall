@@ -257,14 +257,17 @@ func newShellCmd() *cobra.Command {
 	return cmd
 }
 
+// newIndexCmd reserves the 'index' name for the full-text session index.
+// The command is hidden until the index exists, so it does not appear in
+// --help, and it fails clearly instead of pretending to have worked.
 func newIndexCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "index",
-		Short: "Rebuild the full-text session index (not yet)",
-		Args:  cobra.NoArgs,
+		Use:    "index",
+		Short:  "Rebuild the full-text session index",
+		Args:   cobra.NoArgs,
+		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "not yet")
-			return nil
+			return errors.New("index: the full-text session index is not available in this version")
 		},
 	}
 }

@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/MohammedAl-Alimi/recall/internal/model"
 )
@@ -114,17 +117,117 @@ func writeLsJSON(w io.Writer, list []*model.Session) error {
 	return enc.Encode(rows)
 }
 
-// writeLsTable prints a plain aligned table.
-func writeLsTable(w io.Writer, list []*model.Session, now time.Time) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSTATE\tAGE\tPROJECT\tBRANCH\tTITLE")
+// Column limits for the ls table. The full layout is used when stdout is
+// not a terminal; on a terminal the title takes whatever is left of the
+// width and the branch column is dropped when the terminal is narrow.
+const (
+	lsProjectMax   = 28
+	lsBranchMax    = 24
+	lsTitleMax     = 60
+	lsTitleMin     = 24
+	lsBranchMinCol = 100
+	lsDefaultWidth = 120
+	lsColumnGap    = 2
+)
+
+// lsLayout is the column plan for one ls table.
+type lsLayout struct {
+	project, branch, title int
+	showBranch             bool
+}
+
+// lsLayoutFor sizes the columns for width. A width of 0 means unlimited
+// (the classic layout). Otherwise the fixed columns are measured against
+// the rows, the branch column is dropped below lsBranchMinCol, and the
+// title receives the remainder so no row wraps.
+func lsLayoutFor(width int, list []*model.Session, now time.Time) lsLayout {
+	if width <= 0 {
+		return lsLayout{project: lsProjectMax, branch: lsBranchMax, title: lsTitleMax, showBranch: true}
+	}
+	idW, stateW, ageW, projectW, branchW := len("ID"), len("STATE"), len("AGE"), len("PROJECT"), len("BRANCH")
+	for _, s := range list {
+		idW = max(idW, len([]rune(s.Short())))
+		stateW = max(stateW, len(s.State.Word()))
+		ageW = max(ageW, len(humanAge(now, s.LastActive)))
+		projectW = max(projectW, min(lsProjectMax, len([]rune(projectName(s)))))
+		branchW = max(branchW, min(lsBranchMax, len([]rune(s.Branch))))
+	}
+	l := lsLayout{project: projectW, branch: branchW, showBranch: width >= lsBranchMinCol}
+	base := idW + stateW + ageW + 4*lsColumnGap
+	remaining := func() int {
+		n := width - base - l.project
+		if l.showBranch {
+			n -= l.branch + lsColumnGap
+		}
+		return n
+	}
+	// Give room back in order: shrink the branch, drop it, shrink the
+	// project, and only then let the title fall below its minimum.
+	if remaining() < lsTitleMin && l.showBranch {
+		l.branch = max(len("BRANCH"), l.branch-(lsTitleMin-remaining()))
+	}
+	if remaining() < lsTitleMin && l.showBranch {
+		l.showBranch = false
+	}
+	if remaining() < lsTitleMin {
+		l.project = max(len("PROJECT"), l.project-(lsTitleMin-remaining()))
+	}
+	l.title = max(lsTitleMin, remaining())
+	return l
+}
+
+// termWidth returns the column count of w when it is a terminal, else 0
+// (print everything). Falls back to $COLUMNS, then lsDefaultWidth, when the
+// size query fails.
+func termWidth(w io.Writer) int {
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0
+	}
+	ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+	if err != nil {
+		// ENOTTY: a pipe or a file, print the full layout.
+		return 0
+	}
+	if ws.Col > 0 {
+		return int(ws.Col)
+	}
+	if n := widthFromEnv(os.Getenv("COLUMNS")); n > 0 {
+		return n
+	}
+	return lsDefaultWidth
+}
+
+// widthFromEnv parses a $COLUMNS value; anything unusable is 0.
+func widthFromEnv(v string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// writeLsTable prints a plain aligned table sized for width columns
+// (0: unlimited).
+func writeLsTable(w io.Writer, list []*model.Session, now time.Time, width int) {
+	l := lsLayoutFor(width, list, now)
+	tw := tabwriter.NewWriter(w, 0, 0, lsColumnGap, ' ', 0)
+	if l.showBranch {
+		fmt.Fprintln(tw, "ID\tSTATE\tAGE\tPROJECT\tBRANCH\tTITLE")
+	} else {
+		fmt.Fprintln(tw, "ID\tSTATE\tAGE\tPROJECT\tTITLE")
+	}
 	for _, s := range list {
 		title := s.Title
 		if s.Label != "" {
 			title = s.Label + ": " + title
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			s.Short(), s.State.Word(), humanAge(now, s.LastActive), truncate(projectName(s), 28), truncate(s.Branch, 24), truncate(title, 60))
+		cells := []string{s.Short(), s.State.Word(), humanAge(now, s.LastActive), truncate(projectName(s), l.project)}
+		if l.showBranch {
+			cells = append(cells, truncate(s.Branch, l.branch))
+		}
+		cells = append(cells, truncate(title, l.title))
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
 	}
 	tw.Flush()
 }
@@ -212,7 +315,7 @@ func newLsCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "no sessions")
 				return nil
 			}
-			writeLsTable(cmd.OutOrStdout(), list, time.Now())
+			writeLsTable(cmd.OutOrStdout(), list, time.Now(), termWidth(cmd.OutOrStdout()))
 			return nil
 		},
 	}

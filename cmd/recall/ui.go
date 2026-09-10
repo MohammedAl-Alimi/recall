@@ -50,12 +50,12 @@ func runUI(cmd *cobra.Command, fromWidget bool, query string) error {
 			if act.Note != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), "recall:", act.Note)
 			}
-			if _, err := runChild(act, cmd.InOrStdin(), out, cmd.ErrOrStderr()); err != nil {
+			if _, err := runChildHolding(a, act, cmd.InOrStdin(), out, cmd.ErrOrStderr()); err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "recall:", err)
 			}
 			opts.InitialQuery = ""
 			continue
 		}
-		return runAction(act, out)
+		return runHolding(a, act, out)
 	}
 }

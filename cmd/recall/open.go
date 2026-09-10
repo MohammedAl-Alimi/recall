@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -177,6 +178,26 @@ func runAction(act *launch.Action, w io.Writer) error {
 	return launch.Run(act)
 }
 
+// runHolding runs act for an App that may hold session lock files. The App
+// (and the *os.File in its lock map) is otherwise unreachable once Open
+// returned, and the os.File finalizer would close the descriptor if a GC
+// ran between Open and exec. KeepAlive pins it until the process has been
+// replaced or the child has exited.
+func runHolding(a *app.App, act *launch.Action, w io.Writer) error {
+	err := runAction(act, w)
+	runtime.KeepAlive(a)
+	return err
+}
+
+// runChildHolding is runChild with the same lock-pinning guarantee as
+// runHolding, for the widget loop where claude runs as a child process and
+// inherits the lock descriptor.
+func runChildHolding(a *app.App, act *launch.Action, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	code, err := runChild(act, stdin, stdout, stderr)
+	runtime.KeepAlive(a)
+	return code, err
+}
+
 func newOpenCmd() *cobra.Command {
 	var (
 		opts     launch.Options
@@ -214,7 +235,7 @@ or a label set with 'r' in the list.`,
 				printAction(cmd.OutOrStdout(), act)
 				return nil
 			}
-			return runAction(act, cmd.OutOrStdout())
+			return runHolding(a, act, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().BoolVar(&opts.NewTab, "new-tab", false, "open in a new terminal tab")
