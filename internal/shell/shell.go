@@ -211,7 +211,39 @@ func readRC(path string) (string, os.FileMode, error) {
 	return string(data), st.Mode().Perm(), nil
 }
 
+// resolveTarget follows symlinks so that a dotfiles-managed rc file keeps
+// its link: the write lands on the link target instead of replacing the
+// link with a regular file. A missing path resolves through any symlinked
+// parent directories; a dangling link resolves to its target path.
+func resolveTarget(path string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	// The file itself is missing (or the link dangles). Resolve the link
+	// chain by hand so a dangling symlink still ends up writing its target.
+	if target, err := os.Readlink(path); err == nil {
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		return resolveTarget(target)
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		return "", err
+	}
+	return filepath.Join(dir, filepath.Base(path)), nil
+}
+
 func writeRC(path, content string, mode os.FileMode) error {
+	path, err := resolveTarget(path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

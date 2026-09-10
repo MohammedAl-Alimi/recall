@@ -210,3 +210,98 @@ func TestSnippetsParse(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallPreservesSymlink covers rc files managed by a dotfiles repo:
+// the rc path is a symlink and the write must land on the target, leaving
+// the link in place.
+func TestInstallPreservesSymlink(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "dotfiles")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repo, "zshrc")
+	if err := os.WriteFile(target, []byte("export FOO=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rc := filepath.Join(root, ".zshrc")
+	if err := os.Symlink(target, rc); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	if err := Install("zsh", rc); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Lstat(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("install replaced the symlink with a regular file")
+	}
+	got, _ := os.ReadFile(target)
+	want := "export FOO=1\n\n" + Widget("zsh")
+	if string(got) != want {
+		t.Fatalf("symlink target after install:\n%s", got)
+	}
+	if tst, _ := os.Stat(target); tst.Mode().Perm() != 0o600 {
+		t.Fatalf("target mode = %o", tst.Mode().Perm())
+	}
+	if entries, _ := os.ReadDir(repo); len(entries) != 1 {
+		t.Fatalf("temp file left behind in target dir: %v", entries)
+	}
+
+	if err := Uninstall(rc); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Lstat(rc); st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("uninstall replaced the symlink with a regular file")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "export FOO=1\n" {
+		t.Fatalf("symlink target after uninstall:\n%q", got)
+	}
+}
+
+// TestInstallSymlinkedDirAndDanglingLink covers a symlinked parent directory
+// (ZDOTDIR -> dotfiles) and a dangling rc symlink whose target does not exist
+// yet: both must be written through rather than replaced.
+func TestInstallSymlinkedDirAndDanglingLink(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "dotfiles", "zsh")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(root, "zdot")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	rc := filepath.Join(linkDir, ".zshrc")
+	if err := Install("zsh", rc); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(realDir, ".zshrc")); string(got) != Widget("zsh") {
+		t.Fatalf("symlinked dir target:\n%s", got)
+	}
+	if st, _ := os.Lstat(linkDir); st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("directory symlink was replaced")
+	}
+
+	// Dangling link: the target file is created, the link stays.
+	target := filepath.Join(root, "dotfiles", "bashrc")
+	dangling := filepath.Join(root, ".bashrc")
+	if err := os.Symlink("dotfiles/bashrc", dangling); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install("bash", dangling); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Lstat(dangling); st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("dangling symlink was replaced")
+	}
+	if got, _ := os.ReadFile(target); string(got) != Widget("bash") {
+		t.Fatalf("dangling target:\n%s", got)
+	}
+	if !Installed(dangling) {
+		t.Fatal("Installed false through symlink")
+	}
+}
