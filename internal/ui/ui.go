@@ -91,6 +91,8 @@ var (
 	stopFn      = stopSession
 	dirExistsFn = dirExists
 	execPathFn  = os.Executable
+	// tmuxAvailableFn reports whether kept sessions (K) can be started.
+	tmuxAvailableFn = tmuxAvailable
 	// tickFn schedules delayed messages; tests swap it for an immediate one.
 	tickFn = tea.Tick
 )
@@ -178,6 +180,12 @@ type Model struct {
 	input      textinput.Model
 	paletteIdx int
 	dialog     *cwdDialog
+	helpScroll int
+
+	// tmuxChecked caches the result of tmuxAvailableFn for the run.
+	tmuxChecked bool
+	tmuxOK      bool
+	tmuxVersion string
 
 	pendingAction *launch.Action
 	prevStates    map[string]model.State
@@ -449,8 +457,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeHelp:
-		m.mode = modeList
-		return m, nil
+		return m.handleHelpKey(msg)
 	case modeSearch:
 		return m.handleSearchKey(msg)
 	case modePalette:
@@ -465,13 +472,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	act := actionFor(msg)
-	if m.preview && m.width < sideBySideWidth {
-		// Full-screen preview: scroll keys move the text, others fall through.
+	if m.preview {
+		// Preview scrolling uses Ctrl+n/Ctrl+p only, so every letter key
+		// (including K for keep) keeps its documented action.
 		switch msg.String() {
-		case "J", "ctrl+n":
+		case "ctrl+n":
 			m.previewScroll++
 			return m, nil
-		case "K", "ctrl+p":
+		case "ctrl+p":
 			if m.previewScroll > 0 {
 				m.previewScroll--
 			}
@@ -479,6 +487,37 @@ func (m *Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m.perform(act)
+}
+
+// handleHelpKey scrolls the help overlay when it overflows and closes it on
+// any other key.
+func (m *Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	maxScroll := m.helpMaxScroll()
+	if maxScroll > 0 {
+		switch msg.String() {
+		case "j", "down":
+			m.helpScroll = min(maxScroll, m.helpScroll+1)
+			return m, nil
+		case "k", "up":
+			m.helpScroll = max(0, m.helpScroll-1)
+			return m, nil
+		case "pgdown", "ctrl+d":
+			m.helpScroll = min(maxScroll, m.helpScroll+m.helpRows())
+			return m, nil
+		case "pgup", "ctrl+u":
+			m.helpScroll = max(0, m.helpScroll-m.helpRows())
+			return m, nil
+		case "home":
+			m.helpScroll = 0
+			return m, nil
+		case "end":
+			m.helpScroll = maxScroll
+			return m, nil
+		}
+	}
+	m.mode = modeList
+	m.helpScroll = 0
+	return m, nil
 }
 
 // perform executes an action from a key or the palette.
@@ -540,10 +579,10 @@ func (m *Model) perform(act action) (tea.Model, tea.Cmd) {
 		m.input.CursorEnd()
 		return m, m.input.Focus()
 	case actScope:
-		m.cycleScope()
-		m.refreshRows()
+		return m, m.cycleScopeCmd()
 	case actHelp:
 		m.mode = modeHelp
+		m.helpScroll = 0
 	case actPalette:
 		m.mode = modePalette
 		m.paletteIdx = 0
@@ -601,15 +640,14 @@ func (m *Model) performOn(act action, sess *model.Session) (tea.Model, tea.Cmd) 
 		o := m.baseOptions()
 		o.NewTab = true
 		return m.open(sess, o)
-	case actNewWindow:
-		o := m.baseOptions()
-		o.NewTab = true
-		return m.open(sess, o)
 	case actFork:
 		o := m.baseOptions()
 		o.Fork = true
 		return m.open(sess, o)
 	case actKeep:
+		if !m.tmuxAvailable() {
+			return m, m.setStatus(m.tmuxMissingText())
+		}
 		o := m.baseOptions()
 		o.Keep = true
 		return m.open(sess, o)
@@ -632,7 +670,7 @@ func (m *Model) performOn(act action, sess *model.Session) (tea.Model, tea.Cmd) 
 	case actPin:
 		return m, m.togglePin(sess)
 	case actHide:
-		return m, m.hide(m.targets())
+		return m, m.toggleHide(m.targets())
 	case actArchive:
 		return m, m.archive(sess)
 	case actCopyResume:
@@ -669,6 +707,50 @@ func (m *Model) cycleScope() {
 		}
 	}
 	m.scope = index.ScopeAll
+}
+
+// cycleScopeCmd moves to the next scope and refreshes. Entering the ghosts
+// scope loads ghosts when they are not shown yet, so the list is never
+// empty just because g was not pressed.
+func (m *Model) cycleScopeCmd() tea.Cmd {
+	m.cycleScope()
+	if m.scope == index.ScopeGhosts && !m.showGhosts {
+		m.showGhosts = true
+		m.refreshRows()
+		return tea.Batch(m.loadCmd(), m.setStatus("loading ghosts"))
+	}
+	m.refreshRows()
+	return nil
+}
+
+// tmuxAvailable reports (once per run) whether kept sessions can start.
+func (m *Model) tmuxAvailable() bool {
+	if !m.tmuxChecked {
+		m.tmuxChecked = true
+		m.tmuxOK, m.tmuxVersion = tmuxAvailableFn(m.app)
+	}
+	return m.tmuxOK
+}
+
+// tmuxMissingText explains why K is unavailable.
+func (m *Model) tmuxMissingText() string {
+	if m.tmuxVersion != "" {
+		return "K needs tmux 3.2 or newer (found " + m.tmuxVersion + "); brew install tmux"
+	}
+	return "K needs tmux 3.2 or newer; brew install tmux"
+}
+
+// actionDisabled reports whether an action is unavailable on this machine.
+func (m *Model) actionDisabled(a action) bool {
+	return a == actKeep && !m.tmuxAvailable()
+}
+
+// tmuxAvailable is the production tmuxAvailableFn.
+func tmuxAvailable(a *app.App) (bool, string) {
+	if a == nil || a.Tmux == nil {
+		return false, ""
+	}
+	return a.Tmux.Available()
 }
 
 // open plans the launch through the backend, shows the exact command for a
@@ -829,6 +911,16 @@ func (m *Model) doSetup() (tea.Model, tea.Cmd) {
 func (m *Model) confirmTwice(act action, sess *model.Session) tea.Cmd {
 	now := m.now()
 	key := infoFor(act).key
+	what := sess.Short()
+	if act == actDelete && m.selectMode && len(m.marked) > 0 {
+		// The second press removes every marked row, so the prompt must
+		// describe the marked set and the cursor row must be part of it.
+		if !m.marked[sess.ID] {
+			m.pending = nil
+			return m.setStatus(fmt.Sprintf("%s is not marked: Space marks it, or press V to leave select mode", sess.Short()))
+		}
+		what = fmt.Sprintf("%d marked sessions", len(m.targets()))
+	}
 	if m.pending != nil && m.pending.act == act && m.pending.sid == sess.ID && now.Sub(m.pending.at) <= confirmWindow {
 		m.pending = nil
 		if act == actStop {
@@ -837,13 +929,13 @@ func (m *Model) confirmTwice(act action, sess *model.Session) tea.Cmd {
 		return m.trash(m.targets())
 	}
 	m.pending = &pendingConfirm{act: act, sid: sess.ID, at: now}
-	verb := "stop"
+	text := fmt.Sprintf("press %s again within 5s to stop %s", key, what)
 	if act == actDelete {
-		verb = "delete"
+		text = fmt.Sprintf("press %s again within 5s to remove %s from the list (transcripts are kept)", key, what)
 	}
 	at := now
 	return tea.Batch(
-		m.setStatus(fmt.Sprintf("press %s again within 5s to %s %s", key, verb, sess.Short())),
+		m.setStatus(text),
 		tickFn(confirmWindow, func(time.Time) tea.Msg { return expirePendingMsg{at: at} }),
 	)
 }
@@ -874,7 +966,44 @@ func (m *Model) trash(list []*model.Session) tea.Cmd {
 	m.undo = &undoEntry{kind: "delete", sids: sids}
 	m.marked = map[string]bool{}
 	m.refreshRows()
-	return tea.Batch(m.saveMeta(), m.setStatus(fmt.Sprintf("deleted %d (u to undo)", len(sids))))
+	return tea.Batch(m.saveMeta(), m.setStatus(fmt.Sprintf("removed %d from the list, transcripts kept (u to undo)", len(sids))))
+}
+
+// toggleHide hides the targets, or unhides them when every target is
+// already hidden (or trashed), so H works both ways after a restart.
+func (m *Model) toggleHide(list []*model.Session) tea.Cmd {
+	if len(list) == 0 {
+		return nil
+	}
+	allHidden := true
+	for _, s := range list {
+		if !s.Hidden {
+			allHidden = false
+			break
+		}
+	}
+	if allHidden {
+		return m.unhide(list)
+	}
+	return m.hide(list)
+}
+
+// unhide clears the hidden flag and the trash entry of every session.
+func (m *Model) unhide(list []*model.Session) tea.Cmd {
+	if len(list) == 0 || m.app == nil || m.app.Meta == nil {
+		return nil
+	}
+	var sids []string
+	for _, s := range list {
+		m.app.Meta.Unhide(s.ID)
+		m.app.Meta.TrashRestore(s.ID)
+		s.Hidden = false
+		sids = append(sids, s.ID)
+	}
+	m.undo = &undoEntry{kind: "unhide", sids: sids}
+	m.marked = map[string]bool{}
+	m.refreshRows()
+	return tea.Batch(m.saveMeta(), m.setStatus(fmt.Sprintf("unhid %d (u to undo)", len(sids))))
 }
 
 func (m *Model) hide(list []*model.Session) tea.Cmd {
@@ -901,17 +1030,24 @@ func (m *Model) doUndo() tea.Cmd {
 	m.undo = nil
 	all := m.be.Visible(true, true, true)
 	for _, sid := range u.sids {
-		m.app.Meta.Unhide(sid)
+		if u.kind == "unhide" {
+			m.app.Meta.Hide(sid)
+		} else {
+			m.app.Meta.Unhide(sid)
+		}
 		if u.kind == "delete" {
 			m.app.Meta.TrashRestore(sid)
 		}
 		for _, s := range all {
 			if s.ID == sid {
-				s.Hidden = false
+				s.Hidden = u.kind == "unhide"
 			}
 		}
 	}
 	m.refreshRows()
+	if u.kind == "unhide" {
+		return tea.Batch(m.saveMeta(), m.setStatus(fmt.Sprintf("hid %d again", len(u.sids))))
+	}
 	return tea.Batch(m.saveMeta(), m.setStatus(fmt.Sprintf("restored %d", len(u.sids))))
 }
 
@@ -979,9 +1115,7 @@ func (m *Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshRows()
 		return m, nil
 	case "tab":
-		m.cycleScope()
-		m.refreshRows()
-		return m, nil
+		return m, m.cycleScopeCmd()
 	case "up":
 		m.move(-1)
 		return m, nil
@@ -1063,6 +1197,9 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		it := items[m.paletteIdx]
 		if it.disabled {
 			return m, m.setStatus(it.label + ": not available")
+		}
+		if m.actionDisabled(it.act) {
+			return m, m.setStatus(m.tmuxMissingText())
 		}
 		return m.perform(it.act)
 	}

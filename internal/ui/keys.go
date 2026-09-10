@@ -21,7 +21,6 @@ const (
 	actNewInDir
 	actFork
 	actKeep
-	actNewWindow
 	actNewTab
 	actLabel
 	actRenameReal
@@ -61,34 +60,33 @@ type actionInfo struct {
 
 // actionTable is the single source of truth for keys and labels.
 var actionTable = []actionInfo{
-	{actOpen, "Enter", "open session", false, true},
-	{actPreview, "Space", "toggle preview (marks in select mode)", false, true},
+	{actOpen, "Enter", "open here (focus, attach or resume)", false, true},
+	{actPreview, "Space", "preview (mark in select mode)", false, true},
 	{actSearch, "/", "search", false, false},
 	{actScope, "Tab", "cycle scope", false, true},
 	{actHelp, "?", "help", false, true},
 	{actPalette, ":", "command palette", false, false},
 	{actNewHere, "n", "new session here", false, true},
-	{actNewInDir, "N", "new session in this session's dir", false, true},
+	{actNewInDir, "N", "new session in row's dir", false, true},
 	{actFork, "f", "fork session", false, true},
 	{actKeep, "K", "open and keep (tmux)", false, true},
-	{actNewWindow, "O", "open in new window", false, true},
 	{actNewTab, "o", "open in new tab", false, true},
 	{actLabel, "r", "rename label", false, true},
-	{actRenameReal, "", "real rename (needs claude support)", true, true},
+	{actRenameReal, "", "real rename (needs claude)", true, true},
 	{actPin, "p", "pin / unpin", false, true},
-	{actHide, "H", "hide", false, true},
+	{actHide, "H", "hide / unhide", false, true},
 	{actShowHidden, "h", "show hidden", false, true},
 	{actTag, "t", "tag", false, true},
 	{actArchive, "a", "archive now", false, true},
 	{actCopyResume, "y", "copy resume command", false, true},
 	{actCopyLink, "c", "copy claude.ai link", false, true},
 	{actStop, "x", "stop (press twice)", false, true},
-	{actDelete, "D", "delete (press twice)", false, true},
+	{actDelete, "D", "remove from list (press twice)", false, true},
 	{actSetup, "S", "setup", false, true},
 	{actRefresh, "R", "refresh", false, true},
 	{actGhosts, "g", "toggle ghosts", false, true},
 	{actSelectMode, "V", "multi-select mode", false, true},
-	{actUndo, "u", "undo last hide/delete", false, true},
+	{actUndo, "u", "undo last hide/remove", false, true},
 	{actQuit, "q / Esc", "quit", false, true},
 	{actUp, "k / Up", "move up", false, false},
 	{actDown, "j / Down", "move down", false, false},
@@ -110,7 +108,6 @@ var keyToAction = map[string]action{
 	"N":         actNewInDir,
 	"f":         actFork,
 	"K":         actKeep,
-	"O":         actNewWindow,
 	"o":         actNewTab,
 	"r":         actLabel,
 	"R":         actRefresh,
@@ -164,6 +161,16 @@ func infoFor(a action) actionInfo {
 	return actionInfo{act: a}
 }
 
+// navigation reports whether an action only moves the cursor. The help
+// overlay folds these into one line.
+func (a action) navigation() bool {
+	switch a {
+	case actUp, actDown, actPageUp, actPageDown, actHome, actEnd:
+		return true
+	}
+	return false
+}
+
 // destructive reports whether an action needs the confirm-twice guard.
 func (a action) destructive() bool {
 	return a == actStop || a == actDelete
@@ -172,7 +179,7 @@ func (a action) destructive() bool {
 // needsSession reports whether an action operates on the selected row.
 func (a action) needsSession() bool {
 	switch a {
-	case actOpen, actNewInDir, actFork, actKeep, actNewWindow, actNewTab, actLabel,
+	case actOpen, actNewInDir, actFork, actKeep, actNewTab, actLabel,
 		actRenameReal, actPin, actHide, actTag, actArchive, actCopyResume, actCopyLink,
 		actStop, actDelete:
 		return true

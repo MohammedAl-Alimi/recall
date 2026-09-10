@@ -127,6 +127,7 @@ func newTestModel(t *testing.T) (*Model, *fakeBackend) {
 	saveMetaFn = func(model.Paths, *state.Meta) error { return nil }
 	copyFn = func(string) error { return nil }
 	dirExistsFn = dirExists
+	tmuxAvailableFn = func(*app.App) (bool, string) { return true, "3.4" }
 	tickFn = func(d time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
 		return func() tea.Msg { return fn(fixedNow.Add(d)) }
 	}
@@ -134,6 +135,7 @@ func newTestModel(t *testing.T) (*Model, *fakeBackend) {
 		saveMetaFn = state.SaveMeta
 		copyFn = copyToClipboard
 		dirExistsFn = dirExists
+		tmuxAvailableFn = tmuxAvailable
 		tickFn = tea.Tick
 	})
 	m.Update(loadedMsg{})
@@ -343,7 +345,7 @@ func TestNoColorEnv(t *testing.T) {
 func TestKeyToAction(t *testing.T) {
 	cases := map[string]action{
 		"enter": actOpen, " ": actPreview, "/": actSearch, "tab": actScope, "?": actHelp, ":": actPalette,
-		"n": actNewHere, "N": actNewInDir, "f": actFork, "K": actKeep, "O": actNewWindow, "o": actNewTab,
+		"n": actNewHere, "N": actNewInDir, "f": actFork, "K": actKeep, "O": actNone, "o": actNewTab,
 		"r": actLabel, "p": actPin, "H": actHide, "h": actShowHidden, "t": actTag, "a": actArchive,
 		"y": actCopyResume, "c": actCopyLink, "x": actStop, "D": actDelete, "S": actSetup, "R": actRefresh,
 		"g": actGhosts, "q": actQuit, "esc": actQuit, "j": actDown, "k": actUp, "up": actUp, "down": actDown,
@@ -486,11 +488,10 @@ func TestOpenVariantsPassOptions(t *testing.T) {
 	press(m, "f")
 	press(m, "K")
 	press(m, "o")
-	press(m, "O")
-	if len(fb.openedOpts) != 4 {
-		t.Fatalf("want 4 opens, got %d", len(fb.openedOpts))
+	if len(fb.openedOpts) != 3 {
+		t.Fatalf("want 3 opens, got %d", len(fb.openedOpts))
 	}
-	if !fb.openedOpts[0].Fork || !fb.openedOpts[1].Keep || !fb.openedOpts[2].NewTab || !fb.openedOpts[3].NewTab {
+	if !fb.openedOpts[0].Fork || !fb.openedOpts[1].Keep || !fb.openedOpts[2].NewTab {
 		t.Errorf("options not threaded: %+v", fb.openedOpts)
 	}
 	if !fb.openedOpts[0].DryRun {
@@ -797,7 +798,7 @@ func TestHelpPaletteAndPreview(t *testing.T) {
 		t.Fatal("? should open help")
 	}
 	out := ansiRE.ReplaceAllString(m.View(), "")
-	for _, want := range []string{"open session", "copy claude.ai link", "delete (press twice)", "real rename"} {
+	for _, want := range []string{"open here", "copy claude.ai link", "remove from list (press twice)", "real rename"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing %q", want)
 		}
@@ -1027,3 +1028,422 @@ func TestHumanAgeAndHelpers(t *testing.T) {
 
 // archiveDefault restores the production archive hook after tests.
 var archiveDefault = archiveFn
+
+// viewLines returns the plain-text lines of the current view.
+func viewLines(m *Model) []string {
+	return strings.Split(ansiRE.ReplaceAllString(m.View(), ""), "\n")
+}
+
+// The help overlay must fit the terminal: the title and the first entries
+// are visible even at 80x24, and nothing spills past the height or width.
+func TestHelpOverlayFitsSmallTerminals(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {120, 40}, {60, 16}} {
+		m, _ := newTestModel(t)
+		m.width, m.height = size[0], size[1]
+		press(m, "?")
+		lines := viewLines(m)
+		if len(lines) > m.height {
+			t.Errorf("%dx%d: help view is %d lines tall", m.width, m.height, len(lines))
+		}
+		for _, l := range lines {
+			if lipgloss.Width(l) > m.width {
+				t.Errorf("%dx%d: help line wider than terminal: %q", m.width, m.height, l)
+			}
+		}
+		out := strings.Join(lines, "\n")
+		for _, want := range []string{"keys", "open here", "search", "any"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%dx%d: help overlay does not show %q:\n%s", m.width, m.height, want, out)
+			}
+		}
+		if strings.Contains(out, "page up") {
+			t.Errorf("%dx%d: navigation rows should fold into one line", m.width, m.height)
+		}
+		if !strings.Contains(out, "PgUp/PgDn") {
+			t.Errorf("%dx%d: folded navigation line missing", m.width, m.height)
+		}
+		press(m, "q")
+		if m.mode != modeList {
+			t.Errorf("%dx%d: q should close help", m.width, m.height)
+		}
+	}
+}
+
+// When the table still overflows, j and k scroll it and the footer says so.
+func TestHelpOverlayScrolls(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.width, m.height = 60, 16
+	press(m, "?")
+	if m.helpMaxScroll() == 0 {
+		t.Skip("no overflow at 60x16")
+	}
+	out := strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "j/k") {
+		t.Errorf("overflowing help should advertise j/k:\n%s", out)
+	}
+	if !strings.Contains(out, "open here") {
+		t.Errorf("first entry must be visible before scrolling")
+	}
+	press(m, "j")
+	if m.mode != modeHelp || m.helpScroll != 1 {
+		t.Fatalf("j should scroll the help, mode=%d scroll=%d", m.mode, m.helpScroll)
+	}
+	press(m, "pgdown")
+	if m.helpScroll != 1+m.helpRows() {
+		t.Errorf("PgDn should move one page, scroll=%d rows=%d", m.helpScroll, m.helpRows())
+	}
+	press(m, "end")
+	if m.helpScroll != m.helpMaxScroll() {
+		t.Errorf("End should reach the end, scroll=%d max=%d", m.helpScroll, m.helpMaxScroll())
+	}
+	out = strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "quit") {
+		t.Errorf("last entries should be visible after scrolling:\n%s", out)
+	}
+	press(m, "k")
+	if m.helpScroll != m.helpMaxScroll()-1 {
+		t.Errorf("k should scroll up, scroll=%d", m.helpScroll)
+	}
+	press(m, "esc")
+	if m.mode != modeList || m.helpScroll != 0 {
+		t.Errorf("esc should close and reset, mode=%d scroll=%d", m.mode, m.helpScroll)
+	}
+}
+
+// In select mode D describes the marked set, refuses an unmarked cursor
+// row and removes exactly the marked rows.
+func TestSelectModeDeleteNamesMarkedRows(t *testing.T) {
+	m, _ := newTestModel(t)
+	a, b, c := m.rows[0], m.rows[1], m.rows[2]
+	press(m, "V", " ", " ")
+	if !m.marked[a.ID] || !m.marked[b.ID] || m.cursor != 2 {
+		t.Fatalf("Space twice should mark the first two rows, marked=%v cursor=%d", m.marked, m.cursor)
+	}
+	press(m, "D")
+	if m.pending != nil {
+		t.Fatal("D on an unmarked cursor row must not arm")
+	}
+	if !strings.Contains(m.status, "not marked") || !strings.Contains(m.status, c.Short()) {
+		t.Errorf("status should say the cursor row is unmarked: %q", m.status)
+	}
+	press(m, "D")
+	if a.Hidden || b.Hidden || c.Hidden {
+		t.Fatal("nothing may be removed while the cursor row is unmarked")
+	}
+	press(m, "k", "D")
+	if m.pending == nil {
+		t.Fatal("D on a marked row should arm")
+	}
+	for _, want := range []string{"2 marked sessions", "transcripts are kept", "remove"} {
+		if !strings.Contains(m.status, want) {
+			t.Errorf("confirm text lacks %q: %q", want, m.status)
+		}
+	}
+	out := ansiRE.ReplaceAllString(m.View(), "")
+	if strings.Count(out, "!") < 2 {
+		t.Errorf("both marked rows should carry the pending marker:\n%s", out)
+	}
+	drain(press(m, "D"))
+	if !a.Hidden || !b.Hidden || c.Hidden {
+		t.Errorf("second D should remove the marked rows only: a=%v b=%v c=%v", a.Hidden, b.Hidden, c.Hidden)
+	}
+	if !strings.Contains(m.status, "removed 2") || !strings.Contains(m.status, "transcripts kept") {
+		t.Errorf("status = %q", m.status)
+	}
+	if info := infoFor(actDelete); !strings.Contains(info.label, "remove from list") {
+		t.Errorf("delete label should say remove from list, got %q", info.label)
+	}
+}
+
+// H toggles: a hidden or trashed row shown through h comes back with H.
+func TestHideToggleRestoresHiddenAndTrashed(t *testing.T) {
+	m, _ := newTestModel(t)
+	s := m.rows[0]
+	drain(press(m, "H"))
+	if !s.Hidden || len(m.rows) != 2 {
+		t.Fatal("H should hide")
+	}
+	press(m, "h")
+	if len(m.rows) != 3 {
+		t.Fatal("h should show hidden rows")
+	}
+	press(m, "home")
+	for m.selected() != s {
+		press(m, "j")
+	}
+	drain(press(m, "H"))
+	if s.Hidden || m.app.Meta.IsHidden(s.ID) {
+		t.Fatal("H on a hidden row should unhide it")
+	}
+	if !strings.Contains(m.status, "unhid 1") {
+		t.Errorf("status = %q", m.status)
+	}
+	drain(press(m, "u"))
+	if !s.Hidden || !m.app.Meta.IsHidden(s.ID) {
+		t.Fatal("u should undo the unhide")
+	}
+	// A trashed row (D twice) comes back the same way, with its trash
+	// entry cleared.
+	drain(press(m, "H"))
+	press(m, "D")
+	drain(press(m, "D"))
+	if !s.Hidden || len(m.app.Meta.Trash) != 1 {
+		t.Fatalf("D twice should trash: hidden=%v trash=%d", s.Hidden, len(m.app.Meta.Trash))
+	}
+	if !m.showHidden {
+		press(m, "h")
+	}
+	for m.selected() != s {
+		press(m, "j")
+	}
+	drain(press(m, "H"))
+	if s.Hidden || m.app.Meta.IsHidden(s.ID) || len(m.app.Meta.Trash) != 0 {
+		t.Errorf("H should restore a trashed row: hidden=%v metaHidden=%v trash=%d", s.Hidden, m.app.Meta.IsHidden(s.ID), len(m.app.Meta.Trash))
+	}
+}
+
+// O used to promise a new window while opening a tab; the binding is gone.
+func TestNoNewWindowBinding(t *testing.T) {
+	m, fb := newTestModel(t)
+	press(m, "O")
+	if len(fb.opened) != 0 {
+		t.Error("O must not open anything")
+	}
+	for _, i := range actionTable {
+		if strings.Contains(i.label, "window") {
+			t.Errorf("action table still lists a window action: %+v", i)
+		}
+	}
+	if _, ok := keyToAction["O"]; ok {
+		t.Error("O is still bound")
+	}
+}
+
+// Cycling Tab into the ghosts scope loads ghosts instead of showing an
+// empty list.
+func TestGhostScopeLoadsGhosts(t *testing.T) {
+	m, fb := newTestModel(t)
+	fb.sessions = append(fb.sessions, &model.Session{ID: "dddddddd-0000", Title: "ghost", Ghost: true, State: model.StateGhost, GhostPrompts: []string{"hello"}})
+	var cmd tea.Cmd
+	for m.scope != "ghosts" {
+		cmd = press(m, "tab")
+	}
+	if !m.showGhosts {
+		t.Fatal("entering the ghosts scope should switch ghosts on")
+	}
+	loads := fb.loads
+	for _, msg := range drain(cmd) {
+		m.Update(msg)
+	}
+	if fb.loads != loads+1 {
+		t.Errorf("entering the ghosts scope should reload, loads %d -> %d", loads, fb.loads)
+	}
+	if len(m.rows) != 1 || !m.rows[0].Ghost {
+		t.Errorf("ghost scope rows = %v", rowTitles(m))
+	}
+	// Turning ghosts off while in the scope explains itself.
+	m.showGhosts = false
+	m.refreshRows()
+	out := ansiRE.ReplaceAllString(m.View(), "")
+	if !strings.Contains(out, "no ghosts loaded, press g") {
+		t.Errorf("empty ghosts scope should hint at g:\n%s", out)
+	}
+	// Tab from search mode does the same.
+	m2, fb2 := newTestModel(t)
+	press(m2, "/")
+	for m2.scope != "ghosts" {
+		cmd = press(m2, "tab")
+	}
+	if !m2.showGhosts || fb2.loads != 0 {
+		t.Errorf("search Tab into ghosts: showGhosts=%v loads=%d", m2.showGhosts, fb2.loads)
+	}
+	for _, msg := range drain(cmd) {
+		m2.Update(msg)
+	}
+	if fb2.loads != 1 {
+		t.Errorf("search Tab into ghosts should reload, loads=%d", fb2.loads)
+	}
+}
+
+// The key bar follows the mode, and K keeps its meaning in the preview.
+func TestKeyBarFollowsMode(t *testing.T) {
+	m, fb := newTestModel(t)
+	bar := func() string {
+		lines := viewLines(m)
+		return lines[len(lines)-1]
+	}
+	if !strings.Contains(bar(), "Enter open") {
+		t.Errorf("list bar = %q", bar())
+	}
+	press(m, "/")
+	if b := bar(); !strings.Contains(b, "Enter apply") || !strings.Contains(b, "Esc clear") || strings.Contains(b, "Space preview") {
+		t.Errorf("search bar = %q", b)
+	}
+	press(m, "esc")
+	m.width = 80
+	press(m, " ")
+	if b := bar(); !strings.Contains(b, "Ctrl+n/Ctrl+p scroll") || !strings.Contains(b, "Space close") {
+		t.Errorf("full-screen preview bar = %q", b)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if m.previewScroll != 2 {
+		t.Errorf("ctrl+n should scroll the preview, got %d", m.previewScroll)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if m.previewScroll != 1 {
+		t.Errorf("ctrl+p should scroll back, got %d", m.previewScroll)
+	}
+	press(m, "K")
+	if len(fb.openedOpts) != 1 || !fb.openedOpts[0].Keep {
+		t.Errorf("K in the preview must still open and keep, opens=%d", len(fb.openedOpts))
+	}
+	if m.previewScroll != 1 {
+		t.Errorf("K must not scroll the preview, scroll=%d", m.previewScroll)
+	}
+	press(m, " ")
+	press(m, "end", "enter")
+	if m.mode != modeCwd {
+		t.Fatal("expected the missing directory dialog")
+	}
+	if b := bar(); !strings.Contains(b, "o original") || !strings.Contains(b, "h home") || !strings.Contains(b, "c cancel") {
+		t.Errorf("cwd dialog bar = %q", b)
+	}
+	out := strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "file paths from it will") {
+		t.Errorf("cwd dialog should warn about paths:\n%s", out)
+	}
+	press(m, "c")
+	press(m, "r")
+	if b := bar(); !strings.Contains(b, "Enter save") {
+		t.Errorf("label bar = %q", b)
+	}
+	press(m, "esc")
+	press(m, "?")
+	if b := bar(); !strings.Contains(b, "closes") {
+		t.Errorf("help bar = %q", b)
+	}
+}
+
+// The retention banner survives an 80-column terminal in full.
+func TestRetentionBannerFitsNarrow(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.app.RetentionSet = false
+	m.width, m.height = 80, 24
+	out := strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "S sets it.") {
+		t.Errorf("banner lost its call to action at 80 columns:\n%s", out)
+	}
+	m.width = 50
+	out = strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "S sets it.") {
+		t.Errorf("banner should wrap at 50 columns:\n%s", out)
+	}
+	for _, l := range viewLines(m) {
+		if lipgloss.Width(l) > 50 {
+			t.Errorf("line wider than 50: %q", l)
+		}
+	}
+	if len(viewLines(m)) > m.height {
+		t.Errorf("wrapped banner pushed the view past the height")
+	}
+}
+
+// Project and branch columns share their widths across the page so titles
+// and ages line up, the title keeps at least 24 cells, and no line
+// overflows.
+func TestRowColumnsAlignAcrossPage(t *testing.T) {
+	m, fb := newTestModel(t)
+	long := &model.Session{
+		ID: "dddddddd-1111-4222-8333-444444444444", Title: "A very long title that should keep at least twenty four cells",
+		WorkCwd: "/tmp/a-very-long-project-name-here", Branch: "feature/some-really-long-branch-name",
+		LastActive: fixedNow.Add(-5 * time.Hour), State: model.StateClosed, Path: "/tmp/d.jsonl",
+	}
+	fb.sessions = append(fb.sessions, long)
+	for _, width := range []int{80, 100, 140} {
+		m.width, m.height = width, 30
+		m.refreshRows()
+		lines := viewLines(m)
+		var ageCols []int
+		for _, l := range lines {
+			if lipgloss.Width(l) > width {
+				t.Errorf("%d cols: line overflows: %q", width, l)
+			}
+			for _, age := range []string{"3m", "2h", "3d", "5h"} {
+				if strings.HasSuffix(strings.TrimRight(l, " "), age) {
+					ageCols = append(ageCols, lipgloss.Width(strings.TrimRight(l, " ")))
+				}
+			}
+		}
+		if len(ageCols) != 4 {
+			t.Fatalf("%d cols: expected 4 age cells, got %v", width, ageCols)
+		}
+		for _, c := range ageCols[1:] {
+			if c != ageCols[0] {
+				t.Errorf("%d cols: age column not aligned: %v", width, ageCols)
+			}
+		}
+		// The long title keeps at least minTitleW cells.
+		found := false
+		for _, l := range lines {
+			if strings.Contains(l, "A very long title that s") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%d cols: long title squeezed below %d cells:\n%s", width, minTitleW, strings.Join(lines, "\n"))
+		}
+	}
+	// Columns pad so the project cells start at the same column.
+	st := newStyles(false)
+	cols := pageColumns([]*model.Session{m.rows[0], long}, 140)
+	r1 := renderRow(st, m.rows[0], rowOpts{width: 140, now: fixedNow, cols: cols})
+	r2 := renderRow(st, long, rowOpts{width: 140, now: fixedNow, cols: cols})
+	col := func(row, cell string) int {
+		i := strings.Index(row, cell)
+		if i < 0 {
+			return -1
+		}
+		return lipgloss.Width(row[:i])
+	}
+	if i, j := col(r1, "alpha-project"), col(r2, "a-very-long-project-n"); i != j || i < 0 {
+		t.Errorf("project column differs between rows: %d vs %d\n%s\n%s", i, j, r1, r2)
+	}
+}
+
+// K refuses to launch without tmux and explains how to get it.
+func TestKeepNeedsTmux(t *testing.T) {
+	m, fb := newTestModel(t)
+	tmuxAvailableFn = func(*app.App) (bool, string) { return false, "" }
+	press(m, "K")
+	if len(fb.opened) != 0 {
+		t.Fatal("K without tmux must not open")
+	}
+	if !strings.Contains(m.status, "tmux 3.2") || !strings.Contains(m.status, "brew install tmux") {
+		t.Errorf("status = %q", m.status)
+	}
+	press(m, "?")
+	out := strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "needs tmux") {
+		t.Errorf("help should mark K as needing tmux:\n%s", out)
+	}
+	press(m, "esc")
+	press(m, ":")
+	press(m, "k", "e", "e", "p")
+	out = strings.Join(viewLines(m), "\n")
+	if !strings.Contains(out, "needs tmux") {
+		t.Errorf("palette should mark keep as disabled:\n%s", out)
+	}
+	press(m, "enter")
+	if len(fb.opened) != 0 || !strings.Contains(m.status, "tmux") {
+		t.Errorf("palette keep must not open, status=%q", m.status)
+	}
+	// An old tmux is named in the message.
+	m2, _ := newTestModel(t)
+	m2.tmuxChecked = false
+	tmuxAvailableFn = func(*app.App) (bool, string) { return false, "2.9" }
+	press(m2, "K")
+	if !strings.Contains(m2.status, "found 2.9") {
+		t.Errorf("status = %q", m2.status)
+	}
+}

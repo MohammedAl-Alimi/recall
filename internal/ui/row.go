@@ -13,6 +13,83 @@ import (
 // narrowWidth is the terminal width below which columns collapse.
 const narrowWidth = 80
 
+// minTitleW is the narrowest the title column may get before the project
+// and branch columns give way.
+const minTitleW = 24
+
+// columnWidths are the project and branch cell widths shared by every row
+// of a page, so the cells line up and the age column stays put.
+type columnWidths struct {
+	project, branch int
+}
+
+// columnCap is the widest a project or branch cell may be at width.
+func columnCap(width int) int {
+	if width < 100 {
+		return 14
+	}
+	return 22
+}
+
+// rowBranch is the branch shown for sess (the worktree branch when set).
+func rowBranch(sess *model.Session) string {
+	if sess.IsWorktree && sess.WorktreeBranch != "" {
+		return sess.WorktreeBranch
+	}
+	return sess.Branch
+}
+
+// pageColumns measures the project and branch columns over the rows of one
+// page. Below narrowWidth both columns move to the second line.
+func pageColumns(rows []*model.Session, width int) columnWidths {
+	var out columnWidths
+	if width < narrowWidth {
+		return out
+	}
+	c := columnCap(width)
+	for _, s := range rows {
+		out.project = max(out.project, lipgloss.Width(truncate(projectName(s), c)))
+		out.branch = max(out.branch, lipgloss.Width(truncate(rowBranch(s), c)))
+	}
+	return out
+}
+
+// fitColumns shrinks the columns until the title keeps minTitleW cells of
+// avail: the branch column goes first, then the project column narrows.
+func fitColumns(cols columnWidths, avail int) columnWidths {
+	if cols.rightWidth() == 0 || avail-cols.rightWidth() >= minTitleW {
+		return cols
+	}
+	cols.branch = 0
+	if avail-cols.rightWidth() >= minTitleW {
+		return cols
+	}
+	cols.project = min(cols.project, avail-minTitleW-2)
+	if cols.project < 8 {
+		cols.project = 0
+	}
+	return cols
+}
+
+// rightWidth is the width of the project and branch cells plus the gap in
+// front of them, or 0 when both are empty.
+func (c columnWidths) rightWidth() int {
+	w := 0
+	if c.project > 0 {
+		w += c.project
+	}
+	if c.branch > 0 {
+		if w > 0 {
+			w += 2
+		}
+		w += c.branch
+	}
+	if w > 0 {
+		w += 2
+	}
+	return w
+}
+
 // rowOpts controls how one list row is painted.
 type rowOpts struct {
 	width    int
@@ -25,6 +102,8 @@ type rowOpts struct {
 	// press ("x" or "D"), or empty.
 	pending string
 	now     time.Time
+	// cols are the shared page column widths; zero means measure this row.
+	cols columnWidths
 }
 
 // renderRow paints a two-line row for sess. The first line carries the state
@@ -35,8 +114,8 @@ func renderRow(st styles, sess *model.Session, o rowOpts) string {
 	if width < 20 {
 		width = 20
 	}
-	line1 := renderRowLine1(st, sess, o, width)
-	line2 := renderRowLine2(st, sess, o, width)
+	line1, branchShown := renderRowLine1(st, sess, o, width)
+	line2 := renderRowLine2(st, sess, o, width, !branchShown)
 	return line1 + "\n" + line2
 }
 
@@ -61,7 +140,9 @@ func rowPrefix(st styles, o rowOpts) string {
 	return cursor
 }
 
-func renderRowLine1(st styles, sess *model.Session, o rowOpts, width int) string {
+// renderRowLine1 paints the first line and reports whether the branch
+// column made it onto it (otherwise line 2 carries the branch).
+func renderRowLine1(st styles, sess *model.Session, o rowOpts, width int) (string, bool) {
 	prefix := rowPrefix(st, o)
 	prefixW := lipgloss.Width(prefix)
 
@@ -72,33 +153,30 @@ func renderRowLine1(st styles, sess *model.Session, o rowOpts, width int) string
 	ageCell := st.dim.Render(padLeft(age, 8))
 	ageW := lipgloss.Width(ageCell)
 
-	narrow := width < narrowWidth
-	project := projectName(sess)
-	branch := sess.Branch
-	if sess.IsWorktree && sess.WorktreeBranch != "" {
-		branch = sess.WorktreeBranch
+	// Right side columns: project and branch on wide screens only, laid
+	// out at the page's shared widths so every row lines up.
+	cols := o.cols
+	if cols == (columnWidths{}) {
+		cols = pageColumns([]*model.Session{sess}, width)
 	}
-
-	// Right side columns: project and branch on wide screens only.
+	avail := width - prefixW - stateW - 2 - 2 - ageW
+	cols = fitColumns(cols, avail)
 	right := ""
-	if !narrow {
-		parts := []string{}
-		if project != "" {
-			parts = append(parts, st.dim.Render(truncate(project, 22)))
-		}
-		if branch != "" {
-			parts = append(parts, st.dim.Render(truncate(branch, 22)))
-		}
-		right = strings.Join(parts, "  ")
+	if cols.project > 0 {
+		right = st.dim.Render(padRight(truncate(projectName(sess), cols.project), cols.project))
 	}
-	rightW := lipgloss.Width(right)
-	if rightW > 0 {
-		rightW += 2
+	if cols.branch > 0 {
+		if right != "" {
+			right += "  "
+		}
+		right += st.dim.Render(padRight(truncate(rowBranch(sess), cols.branch), cols.branch))
 	}
+	rightW := cols.rightWidth()
 
-	titleW := width - prefixW - stateW - 2 - rightW - 2 - ageW
+	titleW := avail - rightW
 	if titleW < 8 {
-		titleW = 8
+		right, rightW = "", 0
+		titleW = max(8, avail)
 	}
 	title := rowTitle(st, sess, titleW)
 
@@ -107,16 +185,16 @@ func renderRowLine1(st styles, sess *model.Session, o rowOpts, width int) string
 		line += "  " + right
 	}
 	line += "  " + ageCell
+	branchShown := cols.branch > 0 || rowBranch(sess) == ""
 	if o.selected && st.color {
-		return st.selected.Render(fit(line, width))
+		return st.selected.Render(fit(line, width)), branchShown
 	}
-	if o.selected {
-		return fit(line, width)
-	}
-	return fit(line, width)
+	return fit(line, width), branchShown
 }
 
-func renderRowLine2(st styles, sess *model.Session, o rowOpts, width int) string {
+// renderRowLine2 paints the dim second line. With branchHere the branch
+// leads the text because line 1 had no room for its column.
+func renderRowLine2(st styles, sess *model.Session, o rowOpts, width int, branchHere bool) string {
 	indent := "  "
 	if o.selectMode {
 		indent = "      "
@@ -152,6 +230,11 @@ func renderRowLine2(st styles, sess *model.Session, o rowOpts, width int) string
 		}
 	} else {
 		text = rowSummaryText(sess)
+		if branchHere {
+			if b := rowBranch(sess); b != "" {
+				text = strings.TrimSpace(truncate(b, 22) + "  " + text)
+			}
+		}
 	}
 	// Two extra spaces at the front so the text sits under the title column.
 	textW := width - len(indent) - 12 - badgesW

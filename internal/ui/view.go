@@ -5,12 +5,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MohammedAl-Alimi/recall/internal/index"
 	"github.com/MohammedAl-Alimi/recall/internal/model"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// keyBar is painted on the last line of every screen.
+// keyBar is painted on the last line of the list screen. Other modes paint
+// their own bar (see modeKeyBar).
 const keyBar = "Enter open · Space preview · / search · n new · f fork · ? keys"
+
+// Key bars for the other modes.
+const (
+	keyBarSearch   = "Enter apply · Tab scope · Up/Down move · Esc clear"
+	keyBarPreview  = "Ctrl+n/Ctrl+p scroll · Space close · Enter open · ? keys"
+	keyBarCwd      = "o original directory · h home directory · c cancel"
+	keyBarInput    = "Enter save · Esc cancel"
+	keyBarPalette  = "Up/Down pick · Enter run · Esc close"
+	keyBarHelp     = "any key closes"
+	keyBarHelpMore = "j/k scroll · any other key closes"
+)
 
 // View paints the whole screen.
 func (m *Model) View() string {
@@ -55,8 +68,17 @@ func (m *Model) headerLines() []string {
 	}
 	lines := []string{fit(" "+left+strings.Repeat(" ", gap)+right, m.width)}
 
+	// Banners wrap instead of being cut, so the call to action survives
+	// narrow terminals.
+	wrap := lipgloss.NewStyle().Width(max(20, m.width-3))
 	for _, b := range m.banners() {
-		lines = append(lines, fit(" "+st.banner.Render("! "+b), m.width))
+		for i, l := range strings.Split(wrap.Render("! "+b), "\n") {
+			l = strings.TrimRight(l, " ")
+			if i > 0 {
+				l = "  " + l
+			}
+			lines = append(lines, fit(" "+st.banner.Render(l), m.width))
+		}
 	}
 	lines = append(lines, "")
 	return lines
@@ -67,7 +89,7 @@ func (m *Model) banners() []string {
 	var out []string
 	if m.app != nil {
 		if m.loaded && !m.app.RetentionSet {
-			out = append(out, "Retention is not set: Claude deletes transcripts after 30 days. Press S for setup.")
+			out = append(out, "Retention is not set: Claude deletes transcripts after 30 days. S sets it.")
 		}
 		if m.app.Degraded {
 			reason := m.app.DegradedReason
@@ -128,6 +150,8 @@ func (m *Model) viewList(width, height int) string {
 		msg := "no sessions"
 		if !m.loaded {
 			msg = "scanning transcripts"
+		} else if m.scope == index.ScopeGhosts && !m.showGhosts {
+			msg = "no ghosts loaded, press g"
 		} else if m.query != "" {
 			msg = "no sessions match " + m.query
 		}
@@ -145,6 +169,7 @@ func (m *Model) viewList(width, height int) string {
 	}
 	end := min(len(m.rows), m.offset+page)
 	now := m.now()
+	cols := pageColumns(m.rows[m.offset:end], width)
 	var b strings.Builder
 	for i := m.offset; i < end; i++ {
 		s := m.rows[i]
@@ -154,8 +179,10 @@ func (m *Model) viewList(width, height int) string {
 			marked:     m.marked[s.ID],
 			selectMode: m.selectMode,
 			now:        now,
+			cols:       cols,
 		}
-		if m.pending != nil && m.pending.sid == s.ID {
+		if m.pending != nil && (m.pending.sid == s.ID ||
+			(m.pending.act == actDelete && m.selectMode && len(m.marked) > 0 && m.marked[s.ID])) {
 			o.pending = infoFor(m.pending.act).key
 		}
 		b.WriteString(renderRow(m.st, s, o))
@@ -327,30 +354,127 @@ func previewLines(st styles, sess *model.Session, width int, now time.Time) []st
 	return out
 }
 
-// overlay centers content in the body area.
+// overlay centers content in the body area and never lets it grow past
+// the body, so a short terminal shows the top of a dialog, not its tail.
 func (m *Model) overlay(content string, height int) string {
-	box := m.st.dialog.MaxWidth(m.width - 2).Render(content)
-	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
+	w := min(lipgloss.Width(content)+4, m.width-4)
+	box := m.st.dialog.Width(max(10, w)).Render(content)
+	placed := lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.NewStyle().MaxHeight(height).Render(placed)
+}
+
+// Help overlay geometry: border (2), padding (2), title and blank (2),
+// blank and footer (2).
+const (
+	helpChrome  = 8
+	helpKeyW    = 8
+	helpColGap  = 2
+	helpMaxColW = 44
+	helpMinColW = 26
+)
+
+// helpEntry is one line of the help table.
+type helpEntry struct {
+	text     string
+	disabled bool
+}
+
+// helpEntries lists the help lines: one line that folds the cursor keys
+// together, then every other action.
+func (m *Model) helpEntries() []helpEntry {
+	out := []helpEntry{{text: padRight("j/k", helpKeyW) + "move; PgUp/PgDn; Home/End"}}
+	for _, i := range actionTable {
+		if i.act.navigation() {
+			continue
+		}
+		key := i.key
+		if key == "" {
+			key = "palette"
+		}
+		disabled := i.disabled
+		label := i.label
+		if !disabled && m.actionDisabled(i.act) {
+			disabled = true
+			label += " (needs tmux)"
+		}
+		out = append(out, helpEntry{text: padRight(key, helpKeyW) + label, disabled: disabled})
+	}
+	return out
+}
+
+// helpRows is the number of entry rows the help overlay can show.
+func (m *Model) helpRows() int {
+	return max(1, m.listHeight()-helpChrome)
+}
+
+// helpLayout returns the column width, the number of columns and the rows
+// per column for the current terminal size. When the entries do not fit
+// the height in one column, the columns narrow (down to helpMinColW) to
+// make room for more of them before the table falls back to scrolling.
+func (m *Model) helpLayout(entries []helpEntry) (colW, cols, perCol int) {
+	for _, e := range entries {
+		colW = max(colW, lipgloss.Width(e.text))
+	}
+	colW = min(colW, helpMaxColW)
+	inner := m.width - 2 - 4 - 2
+	fits := func(w int) int { return max(1, (inner+helpColGap)/(w+helpColGap)) }
+	rows := m.helpRows()
+	need := (len(entries) + rows - 1) / rows
+	natural := colW
+	if need > fits(colW) {
+		colW = max(helpMinColW, min(colW, (inner+helpColGap)/need-helpColGap))
+	}
+	cols = max(1, min(need, fits(colW)))
+	// Give the columns back whatever width is left over.
+	colW = max(colW, min(natural, (inner+helpColGap)/cols-helpColGap))
+	perCol = (len(entries) + cols - 1) / cols
+	return colW, cols, perCol
+}
+
+// helpMaxScroll is how far the help table can scroll down.
+func (m *Model) helpMaxScroll() int {
+	_, _, perCol := m.helpLayout(m.helpEntries())
+	return max(0, perCol-m.helpRows())
 }
 
 func (m *Model) viewHelp() string {
+	entries := m.helpEntries()
+	colW, cols, perCol := m.helpLayout(entries)
+	rows := m.helpRows()
+	maxScroll := max(0, perCol-rows)
+	m.helpScroll = max(0, min(m.helpScroll, maxScroll))
+
 	var b strings.Builder
 	b.WriteString(m.st.title.Render("keys"))
+	if maxScroll > 0 {
+		b.WriteString("  " + m.st.dim.Render(fmt.Sprintf("rows %d-%d of %d", m.helpScroll+1, min(perCol, m.helpScroll+rows), perCol)))
+	}
 	b.WriteString("\n\n")
-	for _, i := range actionTable {
-		key := i.key
-		if key == "" {
-			key = "(palette)"
+	shown := 0
+	for r := m.helpScroll; r < perCol && shown < rows; r++ {
+		var cells []string
+		for c := 0; c < cols; c++ {
+			i := c*perCol + r
+			if i >= len(entries) {
+				break
+			}
+			e := entries[i]
+			text := padRight(truncate(e.text, colW), colW)
+			if e.disabled {
+				text = m.st.dim.Render(text)
+			}
+			cells = append(cells, text)
 		}
-		line := padRight(key, 10) + i.label
-		if i.disabled {
-			line = m.st.dim.Render(line + " (disabled)")
-		}
-		b.WriteString(line)
+		b.WriteString(strings.TrimRight(strings.Join(cells, strings.Repeat(" ", helpColGap)), " "))
 		b.WriteString("\n")
+		shown++
 	}
 	b.WriteString("\n")
-	b.WriteString(m.st.dim.Render("Space marks rows in select mode (V). Press any key to close."))
+	foot := "Space marks rows in select mode (V). Any key closes."
+	if maxScroll > 0 {
+		foot = "j/k for more. Any other key closes."
+	}
+	b.WriteString(m.st.dim.Render(foot))
 	return b.String()
 }
 
@@ -372,7 +496,10 @@ func (m *Model) viewPalette() string {
 			cursor = "> "
 		}
 		line := cursor + padRight(it.key, 8) + it.label
-		if it.disabled {
+		if it.disabled || m.actionDisabled(it.act) {
+			if !it.disabled {
+				line += " (needs tmux)"
+			}
 			line = m.st.dim.Render(line)
 		} else if i == m.paletteIdx {
 			line = m.st.bold.Render(line)
@@ -399,7 +526,8 @@ func (m *Model) viewCwdDialog() string {
 		b.WriteString(m.st.dim.Render("o  original directory also missing") + "\n")
 	}
 	b.WriteString("h  open in your home directory\n")
-	b.WriteString("c  cancel")
+	b.WriteString("c  cancel\n\n")
+	b.WriteString(m.st.dim.Render("The conversation continues, but file paths from it will\nnot resolve in the new directory."))
 	return b.String()
 }
 
@@ -430,9 +558,36 @@ func (m *Model) viewFooter() string {
 	} else {
 		status = m.st.status.Render(status)
 	}
-	bar := keyBar
-	if m.selectMode {
-		bar = "Space mark · H hide · D delete · V done · " + keyBar
+	return fit(" "+status, m.width) + "\n" + fit(" "+m.st.keybar.Render(m.modeKeyBar()), m.width)
+}
+
+// modeKeyBar returns the key bar for the current mode, so the footer never
+// advertises a key that does something else right now.
+func (m *Model) modeKeyBar() string {
+	switch m.mode {
+	case modeSearch:
+		return keyBarSearch
+	case modeCwd:
+		return keyBarCwd
+	case modeLabel, modeTag:
+		return keyBarInput
+	case modePalette:
+		return keyBarPalette
+	case modeHelp:
+		if m.helpMaxScroll() > 0 {
+			return keyBarHelpMore
+		}
+		return keyBarHelp
 	}
-	return fit(" "+status, m.width) + "\n" + fit(" "+m.st.keybar.Render(bar), m.width)
+	if m.preview && m.width < sideBySideWidth {
+		return keyBarPreview
+	}
+	bar := keyBar
+	if m.preview {
+		bar = "Ctrl+n/Ctrl+p scroll · " + bar
+	}
+	if m.selectMode {
+		bar = "Space mark · H hide · D remove · V done · " + bar
+	}
+	return bar
 }
