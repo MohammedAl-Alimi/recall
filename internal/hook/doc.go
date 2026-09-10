@@ -7,6 +7,10 @@
 //     can never break a Claude session.
 //   - Handle only appends to events.jsonl, saves launch records and archives
 //     transcripts by hard link. It never writes into the Claude directory.
+//   - SessionStart records the claude process argv exactly as it was exec'd
+//     (kern.procargs2 on macOS, /proc/<pid>/cmdline on Linux), never from
+//     whitespace split ps output, so a prompt containing flag-like text is
+//     one token and cannot be replayed as flags on resume.
 //   - InstallSettings and UninstallSettings modify settings.json additively
 //     with a .bak copy. They are never run in tests against a real directory.
 package hook

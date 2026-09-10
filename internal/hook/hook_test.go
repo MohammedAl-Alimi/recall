@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -232,15 +235,69 @@ func TestIsClaudeArgv(t *testing.T) {
 	}
 }
 
-func TestPsLookupReal(t *testing.T) {
-	ppid, args, err := psLookupReal(os.Getpid())
+func TestProcLookupReal(t *testing.T) {
+	ppid, args, err := psLookup(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ppid != os.Getppid() || len(args) == 0 {
 		t.Fatalf("ppid=%d args=%v", ppid, args)
 	}
-	if _, _, err := psLookupReal(0x7fffffff); err == nil {
+	if _, _, err := psLookup(0x7fffffff); err == nil {
 		t.Fatal("expected error for bogus pid")
+	}
+}
+
+// TestProcLookupKeepsQuotedArgs spawns a child whose argv holds a prompt
+// with flag-like text inside and checks that the lookup returns the exact
+// vector: one token per argument, no whitespace splitting.
+func TestProcLookupKeepsQuotedArgs(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	prompt := "explain the --add-dir /Users option  with  double spaces"
+	cmd := exec.Command(sh, "-c", "sleep 30", "sh", prompt, "", "--model=x y")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	ppid, args, err := psLookup(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ppid != os.Getpid() {
+		t.Fatalf("ppid = %d, want %d", ppid, os.Getpid())
+	}
+	want := []string{sh, "-c", "sleep 30", "sh", prompt, "", "--model=x y"}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		// The ps fallback deliberately returns argv[0] only.
+		want = want[:1]
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %q, want %q", args, want)
+	}
+}
+
+// TestSessionStartPromptIsNotSplit records a launch whose prompt contains
+// flag-like text and checks it is saved as a single argv element.
+func TestSessionStartPromptIsNotSplit(t *testing.T) {
+	p := tempPaths(t)
+	prompt := "explain the --add-dir /Users option"
+	fakeChain(t, []string{"claude", "-p", prompt, "--append-system-prompt", "be terse --model x"})
+	in := `{"session_id":"` + sid + `","cwd":"/tmp/proj","hook_event_name":"SessionStart"}`
+	_ = Handle(p, "SessionStart", strings.NewReader(in))
+	l, err := state.LoadLaunch(p, sid)
+	if err != nil || l == nil {
+		t.Fatalf("launch: %v %v", l, err)
+	}
+	want := []string{"claude", "-p", prompt, "--append-system-prompt", "be terse --model x"}
+	if !reflect.DeepEqual(l.Argv, want) {
+		t.Fatalf("argv = %q, want %q", l.Argv, want)
+	}
+	for _, a := range l.Argv {
+		if a == "--add-dir" || a == "/Users" || a == "--model" {
+			t.Fatalf("prompt text leaked as a flag token: %q", l.Argv)
+		}
 	}
 }

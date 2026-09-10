@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -44,8 +42,12 @@ type Payload struct {
 var (
 	// startPID is the pid the SessionStart walk begins from.
 	startPID = os.Getppid
-	// psLookup returns the parent pid and argv of pid.
-	psLookup = psLookupReal
+	// psLookup returns the parent pid and the exact argv of pid. The
+	// platform implementations (proc_*.go) read the NUL separated argument
+	// vector, never whitespace split ps output, so a prompt such as
+	// "explain the --add-dir /Users option" stays one token and can never
+	// be replayed as flags.
+	psLookup = procLookup
 	// maxWalk bounds the ppid chain walk.
 	maxWalk = 12
 )
@@ -198,27 +200,6 @@ func isClaudeArgv(args []string) bool {
 		}
 	}
 	return false
-}
-
-// psLookupReal runs ps for one pid.
-func psLookupReal(pid int) (int, []string, error) {
-	out, err := exec.Command("ps", "-ww", "-o", "ppid=,args=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return 0, nil, err
-	}
-	line := strings.TrimSpace(string(out))
-	if line == "" {
-		return 0, nil, fmt.Errorf("pid %d not found", pid)
-	}
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return 0, nil, fmt.Errorf("unexpected ps output %q", line)
-	}
-	ppid, err := strconv.Atoi(fields[0])
-	if err != nil {
-		return 0, nil, err
-	}
-	return ppid, fields[1:], nil
 }
 
 func logErr(p model.Paths, event string, err error) {
