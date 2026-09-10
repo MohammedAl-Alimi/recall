@@ -4,6 +4,21 @@ All notable changes to recall are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `recall serve`: a local web dashboard. Every session is a card with its
+  state, title, project and last activity, and an Open button that resumes
+  it in a new terminal tab or focuses the tab it is already running in.
+  Loopback only, token protected, no external scripts.
+- cmux support. With the cmux app installed, a session can open as its own
+  cmux workspace, from the dashboard button or with `--terminal cmux`.
+- `--terminal terminal|iterm|cmux` on `recall open` and `recall new`, to
+  choose where a session opens instead of following the current terminal.
+- Prebuilt binaries for macOS and Linux on both architectures, a Homebrew
+  tap, and download links in the README.
+
 ## [0.1.0] - 2026-09-10
 
 First release. Verified on macOS (Darwin 25.4, arm64) against Claude Code
